@@ -1,0 +1,37 @@
+[package]
+name = "nexus-agent"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nexus-agent"
+path = "src/main.rs"
+
+[dependencies]
+nexus-common = { path = "../common" }
+nexus-proto = { path = "../proto" }
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+async-stream = "0.3"
+tokio-stream = "0.1"
+
+# android-specific dependency: lets the agent integrate with Android's
+# logging system (logcat) instead of trying to write to stdout, which
+# foreground services can't rely on in the same way Linux daemons can.
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
+# `log` is used directly in main.rs's android logging init (log::LevelFilter).
+# android_logger depends on it transitively, but it must be declared here to
+# be nameable from our code on the android target.
+log = "0.4"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# on real OSes, plain env-filter tracing to stdout/stderr is fine —
+# already covered by tracing-subscriber above.

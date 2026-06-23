@@ -1,0 +1,27 @@
+[package]
+name = "nexus-fs"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nexus-mount"
+path = "src/main.rs"
+
+[dependencies]
+nexus-common = { path = "../common" }
+nexus-proto = { path = "../proto" }
+tokio.workspace = true
+tonic.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4", features = ["derive"] }
+
+# fuser only builds on platforms that actually have a FUSE userspace
+# library to link against. This crate should never be compiled for
+# aarch64-linux-android — the workspace's Android build targets the
+# `agent` crate only, never `fs`. This cfg is a safety net in case
+# someone tries anyway.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+fuser = "0.15"
+libc = "0.2"

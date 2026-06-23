@@ -1,0 +1,32 @@
+# Workspace-local cargo config.
+# This OVERRIDES your global ~/.cargo/config.toml [build] jobs=2 setting
+# while you're inside the nexus/ directory specifically, and adds the
+# Android cross-compilation targets needed for cargo-ndk.
+
+[build]
+jobs = 2   # keep capped here too — explicit is better than relying on
+           # the global config existing on every machine that clones this repo
+
+# Android cross-compile targets.
+# arm64-v8a covers essentially every Android device from the last ~6 years
+# (your tablet and phone almost certainly included).
+# armeabi-v7a is kept for older/budget devices your friends might test on.
+[target.aarch64-linux-android]
+ar = ".ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+linker = ".ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+
+[target.armv7-linux-androideabi]
+ar = ".ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+linker = ".ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang"
+
+# NOTE: the .ndk paths above are PLACEHOLDERS — replace with the ABSOLUTE path
+# to your own NDK install before doing a bare `cargo build --target ...android`
+# (cargo config does NOT expand ~ or env vars here, so they must be absolute,
+# e.g. /home/you/Android/Sdk/ndk/<version>/toolchains/llvm/prebuilt/linux-x86_64/bin/...).
+# clang binaries are API-level-versioned in modern NDKs (android24 = Android 7.0,
+# the minSdk per docs/adr/0002); archiver is llvm-ar.
+# In practice you don't need to edit these: `cargo ndk` injects the linker/AR via
+# env vars at build time (env overrides config), so the documented
+#   cargo ndk -t arm64-v8a -t armeabi-v7a build --release -p nexus-agent
+# works regardless of what's written here. These entries only matter for a bare
+# `cargo build --target aarch64-linux-android` without cargo-ndk. See docs/adr/0002.

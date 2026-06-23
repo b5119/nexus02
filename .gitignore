@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+
+# Local agent identity/config — never commit device IDs or pairing secrets
+.config/nexus/
+
+# Android NDK gets installed locally, not vendored into the repo
+.ndk/
+*.apk
+*.aab

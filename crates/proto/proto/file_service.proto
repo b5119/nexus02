@@ -1,0 +1,51 @@
+syntax = "proto3";
+package nexus.fs.v1;
+
+// FileService is what the HOST agent exposes (e.g. the Android phone)
+// and what the CLIENT agent calls into (e.g. the Dell's FUSE layer).
+//
+// Kept deliberately small for milestone 1: read-only access.
+// Write support (and the conflict resolution / vector clocks that
+// implies) comes after this path works end to end.
+service FileService {
+  rpc ListDir (ListDirRequest) returns (ListDirResponse);
+  rpc Stat (StatRequest) returns (StatResponse);
+
+  // Streamed so large files don't have to fully buffer in memory —
+  // important on a phone serving files to a laptop over a slow link.
+  rpc ReadFile (ReadFileRequest) returns (stream ReadFileChunk);
+}
+
+message ListDirRequest {
+  string path = 1;
+}
+
+message FileEntry {
+  string name = 1;
+  bool is_dir = 2;
+  uint64 size_bytes = 3;
+  int64 modified_unix = 4;
+}
+
+message ListDirResponse {
+  repeated FileEntry entries = 1;
+}
+
+message StatRequest {
+  string path = 1;
+}
+
+message StatResponse {
+  FileEntry entry = 1;
+  bool found = 2;
+}
+
+message ReadFileRequest {
+  string path = 1;
+  uint64 offset = 2;
+  uint64 length = 3;
+}
+
+message ReadFileChunk {
+  bytes data = 1;
+}

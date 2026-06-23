@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/proto",
+    "crates/agent",
+    "crates/fs",
+]
+
+# Shared dependency versions across the workspace.
+# Keeping these pinned in one place means every crate stays in lockstep,
+# which matters once cargo-ndk cross-compiles agent for Android —
+# version drift between crates is a common source of "works on Linux,
+# fails to link on Android" bugs.
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "sync", "time"] }
+tonic = "0.12"
+prost = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.dev]
+# Lower debug info verbosity to ease RAM pressure during compilation
+# on memory-constrained machines (e.g. 4-core/8GB laptops).
+debug = 1
+incremental = true
+
+[profile.release]
+opt-level = "z"   # optimize for binary size — matters more than speed
+                   # once this ships to a phone over a slow connection
+lto = "thin"
+codegen-units = 4
