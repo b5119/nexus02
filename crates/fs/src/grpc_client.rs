@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use nexus_proto::fs::v1::FileEntry;
 use nexus_proto::fs::v1::{
     file_service_client::FileServiceClient, ListDirRequest, ReadFileRequest, StatRequest,
+    WriteFileRequest, WriteFileResponse,
 };
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
@@ -111,5 +112,33 @@ impl RemoteFs {
             buf.extend_from_slice(&chunk.data);
         }
         Ok(buf)
+    }
+
+    /// Writes `data` to `path` on the host, carrying this client's vector clock
+    /// (with its own counter already incremented). Returns the host's decision
+    /// (Applied / Stale / Conflict) and the authoritative clock.
+    ///
+    /// Defined now as part of the conflict-detection core; it gets wired into
+    /// the FUSE `write`/`create` path in the next session (ADR 0005).
+    #[allow(dead_code)]
+    pub async fn write_file(
+        &self,
+        path: &str,
+        data: Vec<u8>,
+        clock: &nexus_common::VectorClock,
+        writer_device_id: &str,
+    ) -> Result<WriteFileResponse> {
+        let mut client = self.client.clone();
+        let resp = client
+            .write_file(self.authed(WriteFileRequest {
+                path: path.to_string(),
+                data,
+                clock: Some(nexus_proto::fs::v1::VectorClock {
+                    counters: clock.0.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                }),
+                writer_device_id: writer_device_id.to_string(),
+            }))
+            .await?;
+        Ok(resp.into_inner())
     }
 }

@@ -4,9 +4,8 @@ package nexus.fs.v1;
 // FileService is what the HOST agent exposes (e.g. the Android phone)
 // and what the CLIENT agent calls into (e.g. the Dell's FUSE layer).
 //
-// Kept deliberately small for milestone 1: read-only access.
-// Write support (and the conflict resolution / vector clocks that
-// implies) comes after this path works end to end.
+// Reads are milestone 1; WriteFile adds multi-writer support with
+// vector-clock conflict detection (ADR 0005).
 service FileService {
   rpc ListDir (ListDirRequest) returns (ListDirResponse);
   rpc Stat (StatRequest) returns (StatResponse);
@@ -14,6 +13,12 @@ service FileService {
   // Streamed so large files don't have to fully buffer in memory —
   // important on a phone serving files to a laptop over a slow link.
   rpc ReadFile (ReadFileRequest) returns (stream ReadFileChunk);
+
+  // Multi-writer write carrying the writer's vector clock. The host compares
+  // it against its stored clock and either applies it, ignores a stale write,
+  // or (on concurrent edits) keeps both — see ADR 0005. Unary/whole-file for
+  // now; large-file streaming is a future refinement.
+  rpc WriteFile (WriteFileRequest) returns (WriteFileResponse);
 }
 
 message ListDirRequest {
@@ -48,4 +53,36 @@ message ReadFileRequest {
 
 message ReadFileChunk {
   bytes data = 1;
+}
+
+// A file's version vector: device id -> logical counter.
+message VectorClock {
+  map<string, uint64> counters = 1;
+}
+
+message WriteFileRequest {
+  string path = 1;
+  bytes data = 2;
+  // The writer's clock for this file AFTER incrementing its own counter.
+  VectorClock clock = 3;
+  // Which device is performing this write (used in the conflict filename).
+  string writer_device_id = 4;
+}
+
+message WriteFileResponse {
+  enum Result {
+    // Incoming clock dominated (or equalled) the stored one: written through.
+    APPLIED = 0;
+    // Incoming clock was stale (host already had a dominating version):
+    // not applied, client should pull the host's newer version.
+    STALE = 1;
+    // Concurrent edit: original kept untouched, incoming written to a
+    // `.conflict-<device>-<ts>` sibling. conflict_path is set.
+    CONFLICT = 2;
+  }
+  Result result = 1;
+  // The authoritative clock for `path` after this operation.
+  VectorClock clock = 2;
+  // Relative path of the conflict copy, set only when result == CONFLICT.
+  string conflict_path = 3;
 }
