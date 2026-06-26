@@ -25,7 +25,7 @@ tokio-stream = "0.1"
 # Self-signed TLS cert generation. Pinned to the `ring` backend (default for
 # 0.13) so we reuse the same crypto provider tonic's TLS already links, and
 # avoid pulling aws-lc-rs (which needs cmake + a C build on every machine/CI).
-rcgen = "0.13"
+rcgen = "0.14"
 
 [dev-dependencies]
 tempfile = "3"
