@@ -7,12 +7,20 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Third-party actions are pinned to commit SHAs (not mutable tags) for
+# supply-chain integrity; Dependabot (.github/dependabot.yml) keeps them fresh.
+# Checkout uses persist-credentials: false — no job does authenticated git
+# operations after checkout, so there's no reason to leave the token in
+# .git/config where a build step could read it.
+
 jobs:
   build-and-test:
     name: build & test (linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       # protoc is required by tonic-build (prost no longer vendors it) and
       # libfuse3-dev is required for the nexus-fs crate to link against FUSE.
@@ -23,10 +31,10 @@ jobs:
             protobuf-compiler libfuse3-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build
         run: cargo build --workspace --all-targets --verbose
@@ -38,7 +46,9 @@ jobs:
     name: fmt & clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       # clippy compiles the code, so it needs the same system deps as the build.
       - name: Install system dependencies
@@ -48,12 +58,12 @@ jobs:
             protobuf-compiler libfuse3-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt, clippy
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: rustfmt
         run: cargo fmt --all --check
