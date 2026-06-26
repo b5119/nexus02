@@ -7,6 +7,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# CI only reads the repo (build/test/lint) — give the GITHUB_TOKEN no more than
+# read access (addresses zizmor's excessive-permissions finding).
+permissions:
+  contents: read
+
 # Third-party actions are pinned to commit SHAs (not mutable tags) for
 # supply-chain integrity; Dependabot (.github/dependabot.yml) keeps them fresh.
 # Checkout uses persist-credentials: false — no job does authenticated git
@@ -69,4 +74,4 @@ jobs:
         run: cargo fmt --all --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings

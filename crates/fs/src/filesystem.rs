@@ -25,6 +25,12 @@
 //! FUSE implementation — it's tempting to think you can work with paths
 //! throughout, but the kernel API genuinely doesn't let you.
 
+// The gRPC helpers here thread `tonic::Status` (a large ~176-byte error) through
+// their Results to stay uniform with tonic's own surface; boxing it isn't worth
+// it. Scoped to this module rather than crate-wide so the lint stays active
+// elsewhere.
+#![allow(clippy::result_large_err)]
+
 use crate::grpc_client::RemoteFs;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,

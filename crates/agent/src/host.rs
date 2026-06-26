@@ -7,6 +7,12 @@
 //! piece, added once this data-plane path is proven). Do not expose
 //! this on an untrusted network as-is.
 
+// tonic's service trait mandates `Result<_, tonic::Status>`, and Status is a
+// large (~176 byte) error type that can't be boxed without breaking the trait.
+// Scoped to this module (the only place that surface lives in this crate)
+// rather than crate-wide, so the lint stays active everywhere else.
+#![allow(clippy::result_large_err)]
+
 use anyhow::Result;
 use nexus_common::{ClockOrder, ClockStore, VectorClock};
 use nexus_proto::fs::v1::{

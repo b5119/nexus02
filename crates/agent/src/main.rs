@@ -13,11 +13,9 @@
 //! The CLIENT/mount side lives in the separate `nexus-fs` crate,
 //! which calls into a running agent over gRPC rather than embedding
 //! the serving logic itself.
-
-// tonic's service trait mandates `Result<_, tonic::Status>`, and Status is a
-// large (~176 byte) error type. We can't box it without breaking the trait, so
-// this lint is unactionable for the gRPC surface — allow it crate-wide.
-#![allow(clippy::result_large_err)]
+//!
+//! (The `clippy::result_large_err` allow for tonic's `Status` error type is
+//! scoped to `mod host`, where that surface lives — not crate-wide.)
 
 mod config;
 mod host;

@@ -6,11 +6,9 @@
 //! FUSE client; that direction is handled by a custom in-app file
 //! browser instead, which is a separate, much simpler piece (no FUSE
 //! involved at all — just gRPC calls rendered into a list view).
-
-// Our gRPC helpers thread `tonic::Status` (a large ~176-byte error type) through
-// their Results to stay uniform with tonic's own service surface; boxing it
-// everywhere isn't worth it, so allow the lint crate-wide.
-#![allow(clippy::result_large_err)]
+//!
+//! (The `clippy::result_large_err` allow for tonic's `Status` error type is
+//! scoped to `mod filesystem`, where that surface lives — not crate-wide.)
 
 mod config;
 mod filesystem;
