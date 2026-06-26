@@ -25,24 +25,30 @@
 //! FUSE implementation — it's tempting to think you can work with paths
 //! throughout, but the kernel API genuinely doesn't let you.
 
+// The gRPC helpers here thread `tonic::Status` (a large ~176-byte error) through
+// their Results to stay uniform with tonic's own surface; boxing it isn't worth
+// it. Scoped to this module rather than crate-wide so the lint stays active
+// elsewhere.
+#![allow(clippy::result_large_err)]
+
 use crate::grpc_client::RemoteFs;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
+use lru::LruCache;
 use nexus_common::{ClockStore, VectorClock};
 use nexus_proto::fs::v1::write_file_response;
-use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_secs(2); // how long the kernel may
-                                               // cache attrs before re-asking us.
-                                               // Short on purpose for milestone 1 —
-                                               // correctness over performance while
-                                               // we don't have invalidation/Watch wired up yet.
+                                              // cache attrs before re-asking us.
+                                              // Short on purpose for milestone 1 —
+                                              // correctness over performance while
+                                              // we don't have invalidation/Watch wired up yet.
 
 const ROOT_INO: u64 = 1;
 
@@ -243,10 +249,7 @@ impl NexusFuse {
 
         let resp = self
             .runtime
-            .block_on(
-                self.client
-                    .write_file(path, data, &clock, &self.device_id),
-            )
+            .block_on(self.client.write_file(path, data, &clock, &self.device_id))
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         // Adopt the host's authoritative clock so the next write builds on it.
@@ -419,8 +422,8 @@ impl Filesystem for NexusFuse {
         let mut all = vec![
             (ino, FileType::Directory, ".".to_string()),
             (ino, FileType::Directory, "..".to_string()), // simplification: milestone 1
-                                                            // doesn't track true parent ino
-                                                            // for ".." at depth > 1 yet.
+                                                          // doesn't track true parent ino
+                                                          // for ".." at depth > 1 yet.
         ];
 
         for entry in &entries {

@@ -18,6 +18,30 @@ capabilities. State your platform in your PR description:
 | Windows | yes | planned (WinFsp, not started) |
 | Android | yes (within SAF limits) | no — see ADR 0001 |
 
+## System prerequisites
+
+Two non-Rust dependencies trip up first builds — install them before `cargo build`:
+
+- **`protoc`** (Protocol Buffers compiler) — `tonic-build` invokes it to codegen
+  the gRPC layer; without it `nexus-proto` fails to build.
+- **A FUSE userspace library** — `nexus-fs` (the `nexus-mount` binary) links
+  against it. Linux: `libfuse3-dev` + `pkg-config`. macOS: install
+  [macFUSE](https://osxfuse.github.io/). Not needed if you only build
+  `nexus-agent` (e.g. the Android host build, which excludes `nexus-fs`).
+
+```bash
+# Debian/Ubuntu
+sudo apt install -y protobuf-compiler libfuse3-dev pkg-config
+# Fedora
+sudo dnf install -y protobuf-compiler fuse3-devel pkgconf-pkg-config
+# Arch
+sudo pacman -S protobuf fuse3 pkgconf
+# macOS (Homebrew) — plus macFUSE from the link above
+brew install protobuf pkg-config
+```
+
+A Rust toolchain via [rustup](https://rustup.rs/) (stable) is assumed.
+
 ## Build setup
 
 ```bash
@@ -36,7 +60,7 @@ anyone building inside this directory.
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 

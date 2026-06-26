@@ -40,6 +40,10 @@ On first run the agent generates a token and cert in its config dir
 (`$HOME/.config/nexus/`, or `$NEXUS_CONFIG_DIR`); the client needs both.
 
 ```bash
+# Prerequisites: protoc (gRPC codegen) and a FUSE lib (to mount). On Debian/Ubuntu:
+#   sudo apt install -y protobuf-compiler libfuse3-dev pkg-config
+# See CONTRIBUTING.md for other platforms.
+
 # Build everything (capped to 2 parallel jobs — see .cargo/config.toml)
 cargo build
 

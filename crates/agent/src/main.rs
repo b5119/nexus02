@@ -13,6 +13,9 @@
 //! The CLIENT/mount side lives in the separate `nexus-fs` crate,
 //! which calls into a running agent over gRPC rather than embedding
 //! the serving logic itself.
+//!
+//! (The `clippy::result_large_err` allow for tonic's `Status` error type is
+//! scoped to `mod host`, where that surface lives — not crate-wide.)
 
 mod config;
 mod host;

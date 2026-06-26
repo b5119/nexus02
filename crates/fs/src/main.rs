@@ -6,6 +6,9 @@
 //! FUSE client; that direction is handled by a custom in-app file
 //! browser instead, which is a separate, much simpler piece (no FUSE
 //! involved at all — just gRPC calls rendered into a list view).
+//!
+//! (The `clippy::result_large_err` allow for tonic's `Status` error type is
+//! scoped to `mod filesystem`, where that surface lives — not crate-wide.)
 
 mod config;
 mod filesystem;
@@ -15,7 +18,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "nexus-mount", about = "Mount a remote nexus-agent host's files locally")]
+#[command(
+    name = "nexus-mount",
+    about = "Mount a remote nexus-agent host's files locally"
+)]
 struct Args {
     /// Address of the remote agent to mount, e.g. https://192.168.1.50:50051
     /// (must be https — the agent serves TLS). For milestone 1 this is typed
