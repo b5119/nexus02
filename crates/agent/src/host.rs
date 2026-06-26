@@ -17,7 +17,13 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_stream::Stream;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{
+    transport::{Identity, Server, ServerTlsConfig},
+    Request, Response, Status,
+};
+
+/// gRPC metadata header carrying the shared-secret auth token (ADR 0004).
+const AUTH_HEADER: &str = "x-nexus-token";
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64KiB — small enough to keep memory flat,
                                       // large enough to not drown in RPC overhead
@@ -29,9 +35,21 @@ pub struct FileServiceImpl {
 
 impl FileServiceImpl {
     /// Resolves a client-supplied relative path against the served root,
-    /// rejecting any attempt to escape it via `..`. This is the one piece
-    /// of "security" milestone 1 has — everything else (auth, pairing,
-    /// encryption) is explicitly out of scope until the control plane exists.
+    /// rejecting any attempt to escape it — both `../..` traversal and
+    /// symlink-based escapes (a symlink inside root pointing outside it).
+    ///
+    /// Why this is safe: `canonicalize()` fully resolves `..` segments AND
+    /// follows every symlink to a real absolute path *before* the prefix
+    /// check. `self.root` is itself canonicalized in `run()`, so we compare
+    /// canonical-vs-canonical. `Path::starts_with` matches whole path
+    /// components, so a sibling like `/srv/share-evil` does not count as being
+    /// under `/srv/share`. See the tests at the bottom of this file, which
+    /// exercise both attack shapes.
+    ///
+    /// Residual gap (out of scope for milestone 1, LAN-trust): there is a TOCTOU
+    /// window between canonicalize and the subsequent open — a symlink swapped
+    /// in that instant could still be followed. Closing it needs openat2/
+    /// O_NOFOLLOW-style resolution; not worth it before the control plane.
     fn resolve(&self, requested: &str) -> Result<PathBuf, Status> {
         let candidate = self.root.join(requested.trim_start_matches('/'));
         let canonical = candidate
@@ -166,7 +184,21 @@ impl FileService for FileServiceImpl {
     }
 }
 
-pub async fn run(serve_dir: String, port: u16) -> Result<()> {
+/// Constant-time-ish comparison of the presented token against the expected
+/// one — avoids leaking length/content via response timing. Cheap insurance;
+/// the real limits of this auth model are documented in ADR 0004.
+fn token_matches(presented: &[u8], expected: &[u8]) -> bool {
+    if presented.len() != expected.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in presented.iter().zip(expected.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+pub async fn run(serve_dir: String, port: u16, auth_token: String) -> Result<()> {
     let root = PathBuf::from(&serve_dir)
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(&serve_dir));
@@ -176,12 +208,109 @@ pub async fn run(serve_dir: String, port: u16) -> Result<()> {
     let addr = format!("0.0.0.0:{port}").parse()?;
     let service = FileServiceImpl { root };
 
-    tracing::info!(%addr, "FileService listening");
+    // Load (or generate on first run) the self-signed TLS identity.
+    let tls = crate::config::load_or_create_tls_identity()?;
+    let identity = Identity::from_pem(&tls.cert_pem, &tls.key_pem);
+
+    // Auth interceptor: runs before any FileService method dispatches, so an
+    // unauthenticated request is rejected before it can reach resolve() or
+    // touch the filesystem. The expected token is moved into the closure.
+    let expected = auth_token;
+    let interceptor = move |req: Request<()>| -> Result<Request<()>, Status> {
+        match req.metadata().get(AUTH_HEADER) {
+            Some(t) if token_matches(t.as_bytes(), expected.as_bytes()) => Ok(req),
+            _ => Err(Status::unauthenticated("missing or invalid auth token")),
+        }
+    };
+
+    tracing::info!(cert = %tls.cert_path.display(), "TLS enabled (self-signed); clients must trust this cert");
+    tracing::info!(%addr, "FileService listening (TLS + token auth)");
 
     Server::builder()
-        .add_service(FileServiceServer::new(service))
+        .tls_config(ServerTlsConfig::new().identity(identity))?
+        .add_service(FileServiceServer::with_interceptor(service, interceptor))
         .serve(addr)
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn impl_for(root: &std::path::Path) -> FileServiceImpl {
+        FileServiceImpl {
+            root: root.canonicalize().unwrap(),
+        }
+    }
+
+    #[test]
+    fn resolves_legit_paths_inside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("hello.txt"), b"hi").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/x.txt"), b"x").unwrap();
+        let svc = impl_for(dir.path());
+
+        assert!(svc.resolve("hello.txt").unwrap().ends_with("hello.txt"));
+        assert!(svc.resolve("sub/x.txt").unwrap().ends_with("x.txt"));
+        // a leading slash is treated as root-relative, never absolute
+        assert!(svc.resolve("/hello.txt").unwrap().ends_with("hello.txt"));
+    }
+
+    #[test]
+    fn rejects_dotdot_traversal() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("share");
+        fs::create_dir(&root).unwrap();
+        // a secret sibling OUTSIDE the served root
+        fs::write(parent.path().join("secret.txt"), b"top secret").unwrap();
+        let svc = impl_for(&root);
+
+        let err = svc.resolve("../secret.txt").unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::PermissionDenied,
+            "../ escape must be denied"
+        );
+        // deep traversal to a real system file must never succeed
+        assert!(svc.resolve("../../../../../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn rejects_symlink_escape() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("share");
+        fs::create_dir(&root).unwrap();
+        let outside = parent.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"top secret").unwrap();
+
+        // a symlink INSIDE root pointing to a dir OUTSIDE it
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        // and one pointing directly at an outside file
+        std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("link.txt")).unwrap();
+        let svc = impl_for(&root);
+
+        assert_eq!(
+            svc.resolve("escape/secret.txt").unwrap_err().code(),
+            tonic::Code::PermissionDenied,
+            "symlinked-dir escape must be denied"
+        );
+        assert_eq!(
+            svc.resolve("link.txt").unwrap_err().code(),
+            tonic::Code::PermissionDenied,
+            "symlinked-file escape must be denied"
+        );
+    }
+
+    #[test]
+    fn token_compare_is_correct() {
+        assert!(token_matches(b"abc123", b"abc123"));
+        assert!(!token_matches(b"abc123", b"abc124"));
+        assert!(!token_matches(b"abc", b"abc123")); // length mismatch
+        assert!(!token_matches(b"", b"x"));
+    }
 }

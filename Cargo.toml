@@ -14,7 +14,7 @@ members = [
 # fails to link on Android" bugs.
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "sync", "time"] }
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

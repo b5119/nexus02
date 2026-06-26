@@ -27,7 +27,9 @@
 
 use crate::grpc_client::RemoteFs;
 use fuser::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request};
+use lru::LruCache;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -39,41 +41,74 @@ const TTL: Duration = Duration::from_secs(2); // how long the kernel may
 
 const ROOT_INO: u64 = 1;
 
-/// Maps FUSE inode numbers to the remote path they represent.
-/// Grows unboundedly for now — fine for a demo, would need an
-/// eviction policy (LRU) before this is used for real, large trees.
+/// Default upper bound on how many inode<->path entries we keep resident.
+const DEFAULT_INODE_CAP: usize = 10_000;
+
+/// Maps FUSE inode numbers to the remote path they represent, bounded by an
+/// LRU so a long-running mount over a large remote tree can't leak memory
+/// indefinitely. The root (ino 1, "/") is pinned — handled specially outside
+/// the LRU so it can never be evicted. `path_by_ino` is the authoritative
+/// store (and drives eviction); `ino_by_path` is a reverse index kept in sync.
+///
+/// Trade-off (acceptable for a read-only milestone-1 mount): if the kernel
+/// still references an inode we've evicted, a later op on it returns a
+/// stale-handle error for that one entry instead of leaking forever. A
+/// fully-correct FUSE impl would track per-inode lookup counts and only drop
+/// on `forget`; deliberately not doing that yet (see the module header).
 struct InodeTable {
     next_ino: u64,
-    path_by_ino: HashMap<u64, String>,
+    path_by_ino: LruCache<u64, String>,
     ino_by_path: HashMap<String, u64>,
 }
 
 impl InodeTable {
     fn new() -> Self {
-        let mut path_by_ino = HashMap::new();
-        let mut ino_by_path = HashMap::new();
-        path_by_ino.insert(ROOT_INO, "/".to_string());
-        ino_by_path.insert("/".to_string(), ROOT_INO);
+        Self::with_capacity(DEFAULT_INODE_CAP)
+    }
+
+    fn with_capacity(cap: usize) -> Self {
+        let cap = NonZeroUsize::new(cap).expect("inode table capacity must be > 0");
         Self {
             next_ino: 2,
-            path_by_ino,
-            ino_by_path,
+            path_by_ino: LruCache::new(cap),
+            ino_by_path: HashMap::new(),
         }
     }
 
     fn ino_for_path(&mut self, path: &str) -> u64 {
+        if path == "/" {
+            return ROOT_INO;
+        }
         if let Some(&ino) = self.ino_by_path.get(path) {
+            // Touch recency on the authoritative LRU so frequently-used paths
+            // aren't the ones evicted.
+            self.path_by_ino.get(&ino);
             return ino;
         }
         let ino = self.next_ino;
         self.next_ino += 1;
-        self.path_by_ino.insert(ino, path.to_string());
-        self.ino_by_path.insert(path.to_string(), ino);
+        self.insert(ino, path.to_string());
         ino
     }
 
-    fn path_for_ino(&self, ino: u64) -> Option<String> {
+    fn path_for_ino(&mut self, ino: u64) -> Option<String> {
+        if ino == ROOT_INO {
+            return Some("/".to_string());
+        }
         self.path_by_ino.get(&ino).cloned()
+    }
+
+    /// Insert a fresh ino<->path pair, evicting the LRU entry if at capacity
+    /// and keeping the reverse index consistent with whatever got dropped.
+    fn insert(&mut self, ino: u64, path: String) {
+        self.ino_by_path.insert(path.clone(), ino);
+        // `push` returns the displaced entry: the evicted LRU pair when full
+        // (ino is always fresh, so the same-key case can't happen here).
+        if let Some((evicted_ino, evicted_path)) = self.path_by_ino.push(ino, path) {
+            if evicted_ino != ino && self.ino_by_path.get(&evicted_path) == Some(&evicted_ino) {
+                self.ino_by_path.remove(&evicted_path);
+            }
+        }
     }
 }
 
@@ -123,7 +158,7 @@ impl NexusFuse {
 impl Filesystem for NexusFuse {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, reply: ReplyEntry) {
         let parent_path = {
-            let table = self.inodes.lock().unwrap();
+            let mut table = self.inodes.lock().unwrap();
             match table.path_for_ino(parent) {
                 Some(p) => p,
                 None => return reply.error(libc::ENOENT),
@@ -156,7 +191,7 @@ impl Filesystem for NexusFuse {
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let path = {
-            let table = self.inodes.lock().unwrap();
+            let mut table = self.inodes.lock().unwrap();
             match table.path_for_ino(ino) {
                 Some(p) => p,
                 None => return reply.error(libc::ENOENT),
@@ -206,7 +241,7 @@ impl Filesystem for NexusFuse {
         mut reply: ReplyDirectory,
     ) {
         let path = {
-            let table = self.inodes.lock().unwrap();
+            let mut table = self.inodes.lock().unwrap();
             match table.path_for_ino(ino) {
                 Some(p) => p,
                 None => return reply.error(libc::ENOENT),
@@ -265,7 +300,7 @@ impl Filesystem for NexusFuse {
         reply: ReplyData,
     ) {
         let path = {
-            let table = self.inodes.lock().unwrap();
+            let mut table = self.inodes.lock().unwrap();
             match table.path_for_ino(ino) {
                 Some(p) => p,
                 None => return reply.error(libc::ENOENT),
@@ -284,5 +319,50 @@ impl Filesystem for NexusFuse {
                 reply.error(libc::EIO);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_is_pinned_and_never_evicted() {
+        let mut t = InodeTable::with_capacity(2);
+        // churn many distinct paths through a tiny cache
+        for i in 0..100 {
+            t.ino_for_path(&format!("/file{i}"));
+        }
+        assert_eq!(t.path_for_ino(ROOT_INO).as_deref(), Some("/"));
+        assert_eq!(t.ino_for_path("/"), ROOT_INO);
+    }
+
+    #[test]
+    fn bounded_and_evicts_least_recently_used() {
+        let mut t = InodeTable::with_capacity(3);
+        let a = t.ino_for_path("/a");
+        let b = t.ino_for_path("/b");
+        let c = t.ino_for_path("/c");
+
+        // touch a and b so c becomes the least-recently-used entry
+        assert_eq!(t.path_for_ino(a).as_deref(), Some("/a"));
+        assert_eq!(t.path_for_ino(b).as_deref(), Some("/b"));
+
+        // inserting a 4th entry evicts the LRU (/c)
+        let _d = t.ino_for_path("/d");
+        assert!(t.path_for_ino(c).is_none(), "LRU entry should be evicted");
+
+        // reverse index was kept consistent: /c now allocates a fresh ino,
+        // not the stale one
+        assert_ne!(t.ino_for_path("/c"), c, "evicted path must get a new ino");
+    }
+
+    #[test]
+    fn roundtrips_retained_entries() {
+        let mut t = InodeTable::with_capacity(10);
+        let ino = t.ino_for_path("/dir/file.txt");
+        assert_eq!(t.path_for_ino(ino).as_deref(), Some("/dir/file.txt"));
+        // same path returns the same ino
+        assert_eq!(t.ino_for_path("/dir/file.txt"), ino);
     }
 }

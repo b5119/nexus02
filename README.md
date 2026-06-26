@@ -34,16 +34,29 @@ crates/
 
 ## Quickstart (Linux, milestone 1)
 
+The data plane is authenticated + TLS-encrypted (shared secret over a
+self-signed cert — see [docs/adr/0004](docs/adr/0004-shared-secret-auth-and-tls.md)).
+On first run the agent generates a token and cert in its config dir
+(`$HOME/.config/nexus/`, or `$NEXUS_CONFIG_DIR`); the client needs both.
+
 ```bash
 # Build everything (capped to 2 parallel jobs — see .cargo/config.toml)
 cargo build
 
-# Terminal 1: run the host agent, serving a directory
+# Terminal 1: run the host agent, serving a directory.
+# First run generates agent.json (with the auth token) + cert.pem/key.pem
+# under ~/.config/nexus/ and logs where they are.
 ./target/debug/nexus-agent --serve-dir ~/nexus-test-share --port 50051
 
-# Terminal 2: mount it
+# Grab the token and cert path the client will need:
+TOKEN=$(python3 -c "import json;print(json.load(open('$HOME/.config/nexus/agent.json'))['auth_token'])")
+CERT=$HOME/.config/nexus/cert.pem
+
+# Terminal 2: mount it (note: https, plus --token and --ca-cert)
 mkdir -p ~/nexus-mount
-./target/debug/nexus-mount --remote http://127.0.0.1:50051 --mountpoint ~/nexus-mount
+./target/debug/nexus-mount --remote https://127.0.0.1:50051 --mountpoint ~/nexus-mount \
+    --token "$TOKEN" --ca-cert "$CERT"
+# (--token / --ca-cert can also come from NEXUS_AUTH_TOKEN / NEXUS_CA_CERT.)
 
 # Terminal 3: prove it works
 ls ~/nexus-mount
@@ -76,8 +89,13 @@ cross-compiled binary you can push via `adb` for testing.
       byte-exact verified including a chunk-boundary offset read on a 150KB
       file. Run manually via `adb shell` (shell uid, not yet a packaged app —
       see open question below).
+- [x] **Data-plane auth + TLS** — shared-secret token over a self-signed
+      cert; host rejects bad/missing tokens before touching the filesystem.
+      Tested loopback (positive + wrong-token/no-token/wrong-cert negatives).
+      See [docs/adr/0004](docs/adr/0004-shared-secret-auth-and-tls.md).
 - [ ] Write support + conflict resolution (vector clocks)
-- [ ] Pairing / auth (control plane) — currently zero auth, LAN-trust only
+- [ ] Full pairing / control plane (device identity, revocation, key rotation)
+      — ADR 0004 is only the shared-secret step, not this
 - [ ] Layer 1 (remote control / streaming) — not started
 - [ ] Layer 4 (app-cooperative migration SDK) — not started
 
@@ -97,7 +115,15 @@ SAF permission flow, install/update mechanism for the embedded binary).
 
 ## Security note
 
-Milestone 1 has **no authentication**. Any device on the network that
-can reach the host agent's port can read every file under `--serve-dir`.
-Do not run this on an untrusted network. Pairing/auth is planned but
-not yet built — see the Status checklist.
+The data plane now has **shared-secret authentication over TLS** (ADR
+0004): traffic is encrypted, and a client must present the agent's token
+to read anything — the host rejects bad/missing tokens before touching
+the filesystem. This is a real step up from the original "open and
+plaintext" state.
+
+It is **not** the full control plane, though: one flat secret per agent,
+no pairing UX, no per-device revocation, no key rotation, and the token
+sits in plaintext in the agent's config. Treat it as "authenticated,
+encrypted LAN-trust" — fine for your own LAN, not hardened for hostile
+networks. See [docs/adr/0004](docs/adr/0004-shared-secret-auth-and-tls.md)
+for the precise threat model and the Status checklist for what's next.

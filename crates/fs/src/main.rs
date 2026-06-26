@@ -10,21 +10,31 @@
 mod filesystem;
 mod grpc_client;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "nexus-mount", about = "Mount a remote nexus-agent host's files locally")]
 struct Args {
-    /// Address of the remote agent to mount, e.g. http://192.168.1.50:50051
-    /// For milestone 1 this is typed in manually; the control-plane
-    /// registry (device discovery) replaces this once it exists.
+    /// Address of the remote agent to mount, e.g. https://192.168.1.50:50051
+    /// (must be https — the agent serves TLS). For milestone 1 this is typed
+    /// in manually; the control-plane registry replaces this once it exists.
     #[arg(long)]
     remote: String,
 
     /// Local directory to mount onto. Must already exist and be empty.
     #[arg(long)]
     mountpoint: String,
+
+    /// Shared-secret auth token, matching the agent's (found in its config dir,
+    /// agent.json). Falls back to the NEXUS_AUTH_TOKEN env var. See ADR 0004.
+    #[arg(long, env = "NEXUS_AUTH_TOKEN")]
+    token: String,
+
+    /// Path to the agent's TLS certificate (cert.pem from its config dir), used
+    /// to verify the server. Falls back to the NEXUS_CA_CERT env var.
+    #[arg(long, env = "NEXUS_CA_CERT")]
+    ca_cert: String,
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -48,9 +58,12 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    tracing::info!(remote = %args.remote, mountpoint = %args.mountpoint, "mounting");
+    tracing::info!(remote = %args.remote, mountpoint = %args.mountpoint, "mounting (TLS + token auth)");
 
-    let client = grpc_client::RemoteFs::connect(args.remote).await?;
+    let ca_pem = std::fs::read_to_string(&args.ca_cert)
+        .with_context(|| format!("reading agent TLS cert at {}", args.ca_cert))?;
+
+    let client = grpc_client::RemoteFs::connect(args.remote, ca_pem, args.token).await?;
     let fs = filesystem::NexusFuse::new(client);
 
     // mount2 blocks the current thread until unmount; run it on a

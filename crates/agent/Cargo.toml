@@ -18,9 +18,17 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 clap = { version = "4", features = ["derive"] }
 async-stream = "0.3"
 tokio-stream = "0.1"
+# Self-signed TLS cert generation. Pinned to the `ring` backend (default for
+# 0.13) so we reuse the same crypto provider tonic's TLS already links, and
+# avoid pulling aws-lc-rs (which needs cmake + a C build on every machine/CI).
+rcgen = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
 
 # android-specific dependency: lets the agent integrate with Android's
 # logging system (logcat) instead of trying to write to stdout, which

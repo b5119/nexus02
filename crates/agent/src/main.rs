@@ -67,6 +67,10 @@ async fn main() -> Result<()> {
         port = args.port,
         "starting nexus-agent"
     );
+    tracing::info!(
+        "auth token + TLS cert are stored in the config dir (see NEXUS_CONFIG_DIR / \
+         $HOME/.config/nexus/); the client needs both to connect"
+    );
 
-    host::run(args.serve_dir, args.port).await
+    host::run(args.serve_dir, args.port, cfg.auth_token).await
 }
