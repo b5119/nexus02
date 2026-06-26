@@ -26,7 +26,12 @@
 //! throughout, but the kernel API genuinely doesn't let you.
 
 use crate::grpc_client::RemoteFs;
-use fuser::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request};
+use fuser::{
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyWrite, Request, TimeOrNow,
+};
+use nexus_common::{ClockStore, VectorClock};
+use nexus_proto::fs::v1::write_file_response;
 use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -98,6 +103,16 @@ impl InodeTable {
         self.path_by_ino.get(&ino).cloned()
     }
 
+    /// Look up an existing path's inode WITHOUT allocating a new one (and
+    /// without bumping LRU recency). Used to check for a locally-buffered file
+    /// that may not exist on the host yet.
+    fn peek_ino(&self, path: &str) -> Option<u64> {
+        if path == "/" {
+            return Some(ROOT_INO);
+        }
+        self.ino_by_path.get(path).copied()
+    }
+
     /// Insert a fresh ino<->path pair, evicting the LRU entry if at capacity
     /// and keeping the reverse index consistent with whatever got dropped.
     fn insert(&mut self, ino: u64, path: String) {
@@ -112,19 +127,148 @@ impl InodeTable {
     }
 }
 
+/// An in-memory write-back buffer for one open file. FUSE delivers writes in
+/// arbitrary partial chunks; we accumulate the whole file here and flush it to
+/// the host as a single WriteFile (carrying the vector clock) on flush/release.
+struct FileBuf {
+    data: Vec<u8>,
+    /// Has unflushed local content (needs a WriteFile on flush).
+    dirty: bool,
+    /// Have we seeded `data` with the file's current host content? (false for a
+    /// freshly-created file, which starts empty-and-loaded.)
+    loaded: bool,
+}
+
 pub struct NexusFuse {
     client: RemoteFs,
     runtime: tokio::runtime::Handle,
     inodes: Mutex<InodeTable>,
+    /// Per-inode write-back buffers for files currently open for writing.
+    write_buffers: Mutex<HashMap<u64, FileBuf>>,
+    /// This client's device id — stamped into a file's clock on local writes.
+    device_id: String,
+    /// Per-file vector clocks this client knows about (path -> clock).
+    client_clocks: ClockStore,
 }
 
 impl NexusFuse {
-    pub fn new(client: RemoteFs) -> Self {
+    pub fn new(client: RemoteFs, device_id: String, client_clocks: ClockStore) -> Self {
         Self {
             client,
             runtime: tokio::runtime::Handle::current(),
             inodes: Mutex::new(InodeTable::new()),
+            write_buffers: Mutex::new(HashMap::new()),
+            device_id,
+            client_clocks,
         }
+    }
+
+    /// Synthesize attrs for a file from its in-memory buffer (used while it's
+    /// open / before it's been flushed to the host).
+    fn buffer_attr(&self, ino: u64) -> Option<FileAttr> {
+        let bufs = self.write_buffers.lock().unwrap();
+        let b = bufs.get(&ino)?;
+        let size = b.data.len() as u64;
+        let now = SystemTime::now();
+        Some(FileAttr {
+            ino,
+            size,
+            blocks: size.div_ceil(512),
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+            rdev: 0,
+            blksize: 65536,
+            flags: 0,
+        })
+    }
+
+    /// Ensure inode `ino`'s buffer holds the file's current host content. A
+    /// no-op if already loaded (or freshly created). Reads the whole file from
+    /// the host once, so subsequent partial writes can modify-in-place.
+    fn ensure_loaded(&self, ino: u64, path: &str) -> Result<(), tonic::Status> {
+        {
+            let bufs = self.write_buffers.lock().unwrap();
+            if bufs.get(&ino).map(|b| b.loaded).unwrap_or(false) {
+                return Ok(());
+            }
+        }
+        // Fetch current content (size via stat, then a single ranged read).
+        let client = self.client.clone();
+        let size = match self.runtime.block_on(client.stat(path)) {
+            Ok(Some(e)) => e.size_bytes,
+            Ok(None) => 0,
+            Err(e) => return Err(tonic::Status::internal(e.to_string())),
+        };
+        let data = if size > 0 {
+            self.runtime
+                .block_on(self.client.read_range(path, 0, size))
+                .map_err(|e| tonic::Status::internal(e.to_string()))?
+        } else {
+            Vec::new()
+        };
+        let mut bufs = self.write_buffers.lock().unwrap();
+        let b = bufs.entry(ino).or_insert(FileBuf {
+            data: Vec::new(),
+            dirty: false,
+            loaded: false,
+        });
+        if !b.loaded {
+            b.data = data;
+            b.loaded = true;
+        }
+        Ok(())
+    }
+
+    /// Flush a dirty buffer to the host via WriteFile, carrying this client's
+    /// vector clock (own counter incremented). Adopts the host's authoritative
+    /// clock on return. Returns true if a conflict was reported.
+    fn flush_buffer(&self, ino: u64, path: &str) -> Result<bool, tonic::Status> {
+        let data = {
+            let bufs = self.write_buffers.lock().unwrap();
+            match bufs.get(&ino) {
+                Some(b) if b.dirty => b.data.clone(),
+                _ => return Ok(false), // nothing to flush
+            }
+        };
+
+        let mut clock = self.client_clocks.get(path);
+        clock.increment(&self.device_id);
+
+        let resp = self
+            .runtime
+            .block_on(
+                self.client
+                    .write_file(path, data, &clock, &self.device_id),
+            )
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        // Adopt the host's authoritative clock so the next write builds on it.
+        let host_clock = proto_to_clock(&resp.clock);
+        let _ = self.client_clocks.put(path, clock.merge(&host_clock));
+
+        {
+            let mut bufs = self.write_buffers.lock().unwrap();
+            if let Some(b) = bufs.get_mut(&ino) {
+                b.dirty = false;
+            }
+        }
+
+        let conflict = resp.result == write_file_response::Result::Conflict as i32;
+        if conflict {
+            tracing::warn!(
+                %path,
+                conflict = %resp.conflict_path,
+                "host reported a CONFLICT — both versions kept (see the .conflict-* file)"
+            );
+        }
+        Ok(conflict)
     }
 
     fn entry_to_attr(ino: u64, entry: &nexus_proto::fs::v1::FileEntry) -> FileAttr {
@@ -144,7 +288,7 @@ impl NexusFuse {
             ctime: mtime,
             crtime: mtime,
             kind,
-            perm: if entry.is_dir { 0o555 } else { 0o444 }, // read-only mount, milestone 1
+            perm: if entry.is_dir { 0o755 } else { 0o644 }, // read-write mount (ADR 0006)
             nlink: 1,
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
@@ -171,6 +315,15 @@ impl Filesystem for NexusFuse {
         } else {
             format!("{parent_path}/{name_str}")
         };
+
+        // A file we've created/written locally but not yet flushed won't exist
+        // on the host — serve it from its in-memory buffer instead.
+        let local_ino = self.inodes.lock().unwrap().peek_ino(&child_path);
+        if let Some(ino) = local_ino {
+            if let Some(attr) = self.buffer_attr(ino) {
+                return reply.entry(&TTL, &attr, 0);
+            }
+        }
 
         let client = self.client.clone();
         let result = self.runtime.block_on(client.stat(&child_path));
@@ -210,7 +363,7 @@ impl Filesystem for NexusFuse {
                 ctime: SystemTime::now(),
                 crtime: SystemTime::now(),
                 kind: FileType::Directory,
-                perm: 0o555,
+                perm: 0o755,
                 nlink: 2,
                 uid: unsafe { libc::getuid() },
                 gid: unsafe { libc::getgid() },
@@ -218,6 +371,12 @@ impl Filesystem for NexusFuse {
                 blksize: 65536,
                 flags: 0,
             };
+            return reply.attr(&TTL, &attr);
+        }
+
+        // An open/dirty file's authoritative size lives in its write buffer,
+        // not (yet) on the host — report that.
+        if let Some(attr) = self.buffer_attr(ino) {
             return reply.attr(&TTL, &attr);
         }
 
@@ -319,6 +478,190 @@ impl Filesystem for NexusFuse {
                 reply.error(libc::EIO);
             }
         }
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &std::ffi::OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let parent_path = {
+            let mut table = self.inodes.lock().unwrap();
+            match table.path_for_ino(parent) {
+                Some(p) => p,
+                None => return reply.error(libc::ENOENT),
+            }
+        };
+        let name_str = name.to_string_lossy().to_string();
+        let child_path = if parent_path == "/" {
+            format!("/{name_str}")
+        } else {
+            format!("{parent_path}/{name_str}")
+        };
+
+        let ino = self.inodes.lock().unwrap().ino_for_path(&child_path);
+        // Fresh, empty, and dirty so even a zero-byte new file is written
+        // through on flush.
+        self.write_buffers.lock().unwrap().insert(
+            ino,
+            FileBuf {
+                data: Vec::new(),
+                dirty: true,
+                loaded: true,
+            },
+        );
+        let attr = self.buffer_attr(ino).expect("buffer just inserted");
+        reply.created(&TTL, &attr, 0, 0, 0);
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        let path = {
+            let mut table = self.inodes.lock().unwrap();
+            match table.path_for_ino(ino) {
+                Some(p) => p,
+                None => return reply.error(libc::ENOENT),
+            }
+        };
+
+        if self.ensure_loaded(ino, &path).is_err() {
+            return reply.error(libc::EIO);
+        }
+
+        let mut bufs = self.write_buffers.lock().unwrap();
+        let b = bufs.entry(ino).or_insert(FileBuf {
+            data: Vec::new(),
+            dirty: false,
+            loaded: true,
+        });
+        let off = offset as usize;
+        let end = off + data.len();
+        if b.data.len() < end {
+            b.data.resize(end, 0);
+        }
+        b.data[off..end].copy_from_slice(data);
+        b.dirty = true;
+        reply.written(data.len() as u32);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn setattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<TimeOrNow>,
+        _mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let path = {
+            let mut table = self.inodes.lock().unwrap();
+            match table.path_for_ino(ino) {
+                Some(p) => p,
+                None => return reply.error(libc::ENOENT),
+            }
+        };
+
+        // The case we actually need: truncate (e.g. `>` redirection sends size=0).
+        if let Some(new_size) = size {
+            if new_size == 0 {
+                // Truncating to empty — no need to read existing content.
+                self.write_buffers.lock().unwrap().insert(
+                    ino,
+                    FileBuf {
+                        data: Vec::new(),
+                        dirty: true,
+                        loaded: true,
+                    },
+                );
+            } else {
+                if self.ensure_loaded(ino, &path).is_err() {
+                    return reply.error(libc::EIO);
+                }
+                let mut bufs = self.write_buffers.lock().unwrap();
+                if let Some(b) = bufs.get_mut(&ino) {
+                    b.data.resize(new_size as usize, 0);
+                    b.dirty = true;
+                }
+            }
+        }
+
+        // Reply with current attrs: buffer if open, else host, else ENOENT.
+        if let Some(attr) = self.buffer_attr(ino) {
+            return reply.attr(&TTL, &attr);
+        }
+        let client = self.client.clone();
+        match self.runtime.block_on(client.stat(&path)) {
+            Ok(Some(entry)) => reply.attr(&TTL, &Self::entry_to_attr(ino, &entry)),
+            _ => reply.error(libc::ENOENT),
+        }
+    }
+
+    fn flush(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        // `flush` can fire multiple times per open (e.g. on each close() of a
+        // dup'd fd). We do the actual write-back once, on `release` (and on
+        // `fsync`), so the clock is incremented exactly once per write session.
+        reply.ok();
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        if let Some(p) = self.inodes.lock().unwrap().path_for_ino(ino) {
+            let _ = self.flush_buffer(ino, &p);
+        }
+        // Drop the buffer now that the file is fully closed.
+        self.write_buffers.lock().unwrap().remove(&ino);
+        reply.ok();
+    }
+
+    fn fsync(&mut self, _req: &Request, ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
+        let path = self.inodes.lock().unwrap().path_for_ino(ino);
+        match path {
+            Some(p) => match self.flush_buffer(ino, &p) {
+                Ok(_) => reply.ok(),
+                Err(_) => reply.error(libc::EIO),
+            },
+            None => reply.ok(),
+        }
+    }
+}
+
+fn proto_to_clock(p: &Option<nexus_proto::fs::v1::VectorClock>) -> VectorClock {
+    match p {
+        Some(c) => VectorClock(c.counters.iter().map(|(k, v)| (k.clone(), *v)).collect()),
+        None => VectorClock::new(),
     }
 }
 

@@ -118,9 +118,7 @@ impl RemoteFs {
     /// (with its own counter already incremented). Returns the host's decision
     /// (Applied / Stale / Conflict) and the authoritative clock.
     ///
-    /// Defined now as part of the conflict-detection core; it gets wired into
-    /// the FUSE `write`/`create` path in the next session (ADR 0005).
-    #[allow(dead_code)]
+    /// Wired into the FUSE `write`/`create`/flush path (ADR 0006).
     pub async fn write_file(
         &self,
         path: &str,
