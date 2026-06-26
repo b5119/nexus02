@@ -58,13 +58,19 @@ mkdir -p ~/nexus-mount
     --token "$TOKEN" --ca-cert "$CERT"
 # (--token / --ca-cert can also come from NEXUS_AUTH_TOKEN / NEXUS_CA_CERT.)
 
-# Terminal 3: prove it works
+# Terminal 3: prove it works (read AND write — the mount is read-write)
 ls ~/nexus-mount
 cat ~/nexus-mount/some-file.txt
+echo "edited from the Dell" > ~/nexus-mount/some-file.txt   # writes through to the host
 
 # Unmount when done
 fusermount3 -u ~/nexus-mount
 ```
+
+Writes carry a vector clock; if two devices edit the same file independently
+the host keeps both (`<name>.conflict-<device>-<ts>`) rather than losing one —
+see [docs/adr/0005](docs/adr/0005-vector-clock-conflict-detection.md) and
+[docs/adr/0006](docs/adr/0006-fuse-read-write-mount.md).
 
 ## Android (host role only — see ADR 0001)
 
@@ -78,7 +84,7 @@ cross-compiled binary you can push via `adb` for testing.
 - [x] Workspace scaffold
 - [x] `FileService` proto (ListDir, Stat, ReadFile)
 - [x] Host agent (Linux) — serves a local directory over gRPC
-- [x] FUSE client (Linux) — mounts a remote agent's files read-only
+- [x] FUSE client (Linux) — mounts a remote agent's files (read-write)
 - [x] Compile-verified on real hardware (Dell Latitude E6530, i7-3520M)
 - [x] Loopback test passed (Dell → Dell): byte-exact reads, including a
       chunk-boundary-spanning offset read on a 200KB file
@@ -93,7 +99,15 @@ cross-compiled binary you can push via `adb` for testing.
       cert; host rejects bad/missing tokens before touching the filesystem.
       Tested loopback (positive + wrong-token/no-token/wrong-cert negatives).
       See [docs/adr/0004](docs/adr/0004-shared-secret-auth-and-tls.md).
-- [ ] Write support + conflict resolution (vector clocks)
+- [x] **Multi-writer conflict detection (vector clocks)** — every file carries
+      a vector clock; concurrent edits are detected and BOTH kept
+      (`.conflict-*`), never silently merged or lost. Proven at the protocol
+      level and through the actual read-write mount (two devices editing the
+      same file → conflict file, original untouched). See
+      [docs/adr/0005](docs/adr/0005-vector-clock-conflict-detection.md) +
+      [docs/adr/0006](docs/adr/0006-fuse-read-write-mount.md). Known gaps named
+      in those ADRs (reads don't sync clocks → conservative over-detection;
+      no delete/rename/dir conflicts yet).
 - [ ] Full pairing / control plane (device identity, revocation, key rotation)
       — ADR 0004 is only the shared-secret step, not this
 - [ ] Layer 1 (remote control / streaming) — not started

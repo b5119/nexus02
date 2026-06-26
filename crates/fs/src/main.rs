@@ -7,6 +7,7 @@
 //! browser instead, which is a separate, much simpler piece (no FUSE
 //! involved at all — just gRPC calls rendered into a list view).
 
+mod config;
 mod filesystem;
 mod grpc_client;
 
@@ -63,15 +64,23 @@ async fn main() -> Result<()> {
     let ca_pem = std::fs::read_to_string(&args.ca_cert)
         .with_context(|| format!("reading agent TLS cert at {}", args.ca_cert))?;
 
+    // This client's own identity + per-file clock memory (for multi-writer
+    // conflict detection — ADR 0005/0006).
+    let cfg = config::ClientConfig::load_or_create()?;
+    let clocks = nexus_common::ClockStore::open(config::clock_store_path()?)
+        .context("opening client clock store")?;
+    tracing::info!(device_id = %cfg.device_id, "client identity loaded");
+
     let client = grpc_client::RemoteFs::connect(args.remote, ca_pem, args.token).await?;
-    let fs = filesystem::NexusFuse::new(client);
+    let fs = filesystem::NexusFuse::new(client, cfg.device_id.to_string(), clocks);
 
     // mount2 blocks the current thread until unmount; run it on a
     // dedicated blocking thread so we don't tie up the tokio runtime
     // that grpc_client needs for its async calls underneath.
     let mountpoint = args.mountpoint.clone();
     tokio::task::spawn_blocking(move || {
-        let options = vec![fuser::MountOption::RO, fuser::MountOption::FSName("nexus".into())];
+        // Read-write mount (ADR 0006). Default is RW; we only set FSName.
+        let options = vec![fuser::MountOption::FSName("nexus".into())];
         fuser::mount2(fs, &mountpoint, &options)
     })
     .await??;

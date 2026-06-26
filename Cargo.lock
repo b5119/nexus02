@@ -741,6 +741,8 @@ dependencies = [
  "lru",
  "nexus-common",
  "nexus-proto",
+ "serde",
+ "serde_json",
  "tokio",
  "tonic",
  "tracing",
