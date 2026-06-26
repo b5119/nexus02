@@ -105,9 +105,11 @@ cross-compiled binary you can push via `adb` for testing.
       level and through the actual read-write mount (two devices editing the
       same file → conflict file, original untouched). See
       [docs/adr/0005](docs/adr/0005-vector-clock-conflict-detection.md) +
-      [docs/adr/0006](docs/adr/0006-fuse-read-write-mount.md). Known gaps named
-      in those ADRs (reads don't sync clocks → conservative over-detection;
-      no delete/rename/dir conflicts yet).
+      [docs/adr/0006](docs/adr/0006-fuse-read-write-mount.md). Reading a file
+      then editing it no longer false-conflicts — the client syncs the clock on
+      a read-intent open ([docs/adr/0007](docs/adr/0007-read-open-clock-sync.md)),
+      while a blind overwrite of a changed file still conflicts. Remaining gaps
+      named in the ADRs (no delete/rename/dir conflicts yet).
 - [ ] Full pairing / control plane (device identity, revocation, key rotation)
       — ADR 0004 is only the shared-secret step, not this
 - [ ] Layer 1 (remote control / streaming) — not started

@@ -162,6 +162,10 @@ impl FileService for FileServiceImpl {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
 
+                // Include the file's current clock so a reading client can
+                // sync its knowledge before editing (ADR 0007).
+                let clock = self.clocks.get(&Self::clock_key(&req.path));
+
                 Ok(Response::new(StatResponse {
                     entry: Some(FileEntry {
                         name,
@@ -170,11 +174,13 @@ impl FileService for FileServiceImpl {
                         modified_unix,
                     }),
                     found: true,
+                    clock: Some(clock_to_proto(&clock)),
                 }))
             }
             Err(_) => Ok(Response::new(StatResponse {
                 entry: None,
                 found: false,
+                clock: None,
             })),
         }
     }
@@ -593,5 +599,40 @@ mod tests {
             "unexpected conflict name: {}",
             rc.conflict_path
         );
+    }
+
+    // ADR 0007: Stat returns the file's current clock so a reading client can
+    // sync before editing.
+    #[tokio::test]
+    async fn stat_returns_the_files_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+
+        // A written file reports its stored clock.
+        s.write_file(write_req("f.txt", b"hi", &[("dell", 3)], "dell"))
+            .await
+            .unwrap();
+        let resp = s
+            .stat(Request::new(StatRequest {
+                path: "f.txt".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.found);
+        assert_eq!(clock_from_proto(&resp.clock).get("dell"), 3);
+
+        // A file that exists but was never written through WriteFile has an
+        // empty clock (so a single editor of it won't spuriously conflict).
+        std::fs::write(dir.path().join("plain.txt"), b"x").unwrap();
+        let r2 = s
+            .stat(Request::new(StatRequest {
+                path: "plain.txt".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r2.found);
+        assert_eq!(clock_from_proto(&r2.clock), VectorClock::new());
     }
 }
