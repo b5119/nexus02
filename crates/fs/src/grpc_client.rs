@@ -83,6 +83,15 @@ impl RemoteFs {
     }
 
     pub async fn stat(&self, path: &str) -> Result<Option<FileEntry>> {
+        Ok(self.stat_full(path).await?.map(|(entry, _clock)| entry))
+    }
+
+    /// Like `stat`, but also returns the file's vector clock so the FUSE layer
+    /// can sync this client's clock knowledge on a read-intent open (ADR 0007).
+    pub async fn stat_full(
+        &self,
+        path: &str,
+    ) -> Result<Option<(FileEntry, nexus_common::VectorClock)>> {
         let mut client = self.client.clone();
         let resp = client
             .stat(self.authed(StatRequest {
@@ -90,7 +99,18 @@ impl RemoteFs {
             }))
             .await?;
         let inner = resp.into_inner();
-        Ok(if inner.found { inner.entry } else { None })
+        if !inner.found {
+            return Ok(None);
+        }
+        let entry = match inner.entry {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        let clock = match inner.clock {
+            Some(c) => nexus_common::VectorClock(c.counters.into_iter().collect()),
+            None => nexus_common::VectorClock::new(),
+        };
+        Ok(Some((entry, clock)))
     }
 
     /// Reads a byte range and returns it fully buffered.

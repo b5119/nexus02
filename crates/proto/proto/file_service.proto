@@ -43,6 +43,9 @@ message StatRequest {
 message StatResponse {
   FileEntry entry = 1;
   bool found = 2;
+  // The file's current vector clock, so a reading client can sync its own
+  // knowledge before editing (ADR 0007). Empty for untracked / not-found.
+  VectorClock clock = 3;
 }
 
 message ReadFileRequest {

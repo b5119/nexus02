@@ -28,7 +28,7 @@
 use crate::grpc_client::RemoteFs;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyWrite, Request, TimeOrNow,
+    ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
 use nexus_common::{ClockStore, VectorClock};
 use nexus_proto::fs::v1::write_file_response;
@@ -478,6 +478,28 @@ impl Filesystem for NexusFuse {
                 reply.error(libc::EIO);
             }
         }
+    }
+
+    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
+        // On a read-intent open, sync this client's clock for the file from the
+        // host, so a later edit builds on the version we actually read instead
+        // of being flagged a spurious conflict (ADR 0007). A write-only open
+        // (e.g. the truncating `>`) is deliberately NOT synced: blindly
+        // overwriting a file that changed underneath us is a real conflict we
+        // still want to catch.
+        let access = flags & libc::O_ACCMODE;
+        if access == libc::O_RDONLY || access == libc::O_RDWR {
+            let path = self.inodes.lock().unwrap().path_for_ino(ino);
+            if let Some(path) = path {
+                if let Ok(Some((_entry, host_clock))) =
+                    self.runtime.block_on(self.client.stat_full(&path))
+                {
+                    let merged = self.client_clocks.get(&path).merge(&host_clock);
+                    let _ = self.client_clocks.put(&path, merged);
+                }
+            }
+        }
+        reply.opened(0, 0);
     }
 
     fn create(

@@ -61,12 +61,11 @@ safely preserved server-side) — see "new gaps" for why.
   (A's) untouched — the ADR-0005 conflict result, now proven through FUSE.
 
 ## New gaps this surfaced (named, not papered over)
-- **Reads don't sync clocks.** A client learns a path's clock only from a
-  `WriteFile` response; `Stat`/`ReadFile` don't carry clocks. So a device that
-  only ever *read* a file and then edits it has an empty local clock and its
-  edit is flagged concurrent (a conflict) even though it causally followed.
-  This errs toward **over-detecting** conflicts — annoying but **safe** (never
-  silently loses data). Fixing it needs clocks on read/stat responses.
+- ~~**Reads don't sync clocks.**~~ **RESOLVED in ADR 0007.** `Stat` now carries
+  the clock and the client syncs on a read-intent `open`, so read-then-edit no
+  longer false-conflicts while blind overwrites still do. (Originally: a device
+  that only read a file then edited it had an empty clock and was flagged
+  concurrent — safe over-detection, but annoying.)
 - **Conflicts are detected at flush, not at `write()`.** With write-back, the
   `write()` syscall has already returned success by the time the conflict is
   known (on close). We log it and keep both server-side rather than failing the
