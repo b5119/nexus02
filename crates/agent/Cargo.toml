@@ -34,7 +34,7 @@ tempfile = "3"
 # logging system (logcat) instead of trying to write to stdout, which
 # foreground services can't rely on in the same way Linux daemons can.
 [target.'cfg(target_os = "android")'.dependencies]
-android_logger = "0.14"
+android_logger = "0.15"
 # `log` is used directly in main.rs's android logging init (log::LevelFilter).
 # android_logger depends on it transitively, but it must be declared here to
 # be nameable from our code on the android target.
