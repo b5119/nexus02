@@ -50,7 +50,10 @@ impl DeviceKind {
     /// Android returns false — it can only be browsed via the in-app UI,
     /// never mounted as a real filesystem for other apps to see.
     pub fn supports_fuse_client(&self) -> bool {
-        matches!(self, DeviceKind::Linux | DeviceKind::MacOs | DeviceKind::Windows)
+        matches!(
+            self,
+            DeviceKind::Linux | DeviceKind::MacOs | DeviceKind::Windows
+        )
     }
 }
 
@@ -228,8 +231,14 @@ mod clock_tests {
 
     #[test]
     fn equal_clocks() {
-        assert_eq!(clock(&[("a", 1)]).compare(&clock(&[("a", 1)])), ClockOrder::Equal);
-        assert_eq!(VectorClock::new().compare(&VectorClock::new()), ClockOrder::Equal);
+        assert_eq!(
+            clock(&[("a", 1)]).compare(&clock(&[("a", 1)])),
+            ClockOrder::Equal
+        );
+        assert_eq!(
+            VectorClock::new().compare(&VectorClock::new()),
+            ClockOrder::Equal
+        );
     }
 
     #[test]
@@ -245,7 +254,10 @@ mod clock_tests {
             ClockOrder::DominatedBy
         );
         // a non-empty clock dominates the empty one (new file case)
-        assert_eq!(clock(&[("a", 1)]).compare(&VectorClock::new()), ClockOrder::Dominates);
+        assert_eq!(
+            clock(&[("a", 1)]).compare(&VectorClock::new()),
+            ClockOrder::Dominates
+        );
     }
 
     #[test]
@@ -277,7 +289,8 @@ mod clock_tests {
 
     #[test]
     fn store_roundtrips_and_persists() {
-        let dir = std::env::temp_dir().join(format!("nexus-clockstore-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("nexus-clockstore-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("clocks.json");
 

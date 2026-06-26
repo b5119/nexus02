@@ -14,6 +14,11 @@
 //! which calls into a running agent over gRPC rather than embedding
 //! the serving logic itself.
 
+// tonic's service trait mandates `Result<_, tonic::Status>`, and Status is a
+// large (~176 byte) error type. We can't box it without breaking the trait, so
+// this lint is unactionable for the gRPC surface — allow it crate-wide.
+#![allow(clippy::result_large_err)]
+
 mod config;
 mod host;
 

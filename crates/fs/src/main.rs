@@ -7,6 +7,11 @@
 //! browser instead, which is a separate, much simpler piece (no FUSE
 //! involved at all — just gRPC calls rendered into a list view).
 
+// Our gRPC helpers thread `tonic::Status` (a large ~176-byte error type) through
+// their Results to stay uniform with tonic's own service surface; boxing it
+// everywhere isn't worth it, so allow the lint crate-wide.
+#![allow(clippy::result_large_err)]
+
 mod config;
 mod filesystem;
 mod grpc_client;
@@ -15,7 +20,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "nexus-mount", about = "Mount a remote nexus-agent host's files locally")]
+#[command(
+    name = "nexus-mount",
+    about = "Mount a remote nexus-agent host's files locally"
+)]
 struct Args {
     /// Address of the remote agent to mount, e.g. https://192.168.1.50:50051
     /// (must be https — the agent serves TLS). For milestone 1 this is typed

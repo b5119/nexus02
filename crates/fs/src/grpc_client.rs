@@ -34,9 +34,8 @@ impl RemoteFs {
     /// token or unreachable host fails *here*, at mount time, with a clear
     /// error rather than later as an opaque EIO on the first `ls`.
     pub async fn connect(addr: String, ca_pem: String, token: String) -> Result<Self> {
-        let token: MetadataValue<Ascii> = token
-            .parse()
-            .context("auth token must be valid ASCII")?;
+        let token: MetadataValue<Ascii> =
+            token.parse().context("auth token must be valid ASCII")?;
 
         let tls = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(ca_pem))

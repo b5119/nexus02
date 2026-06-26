@@ -11,8 +11,8 @@ use anyhow::Result;
 use nexus_common::{ClockOrder, ClockStore, VectorClock};
 use nexus_proto::fs::v1::{
     file_service_server::{FileService, FileServiceServer},
-    write_file_response, FileEntry, ListDirRequest, ListDirResponse, ReadFileChunk, ReadFileRequest,
-    StatRequest, StatResponse, WriteFileRequest, WriteFileResponse,
+    write_file_response, FileEntry, ListDirRequest, ListDirResponse, ReadFileChunk,
+    ReadFileRequest, StatRequest, StatResponse, WriteFileRequest, WriteFileResponse,
 };
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -28,8 +28,8 @@ use tonic::{
 const AUTH_HEADER: &str = "x-nexus-token";
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64KiB — small enough to keep memory flat,
-                                      // large enough to not drown in RPC overhead
-                                      // over a phone's wifi link.
+                                     // large enough to not drown in RPC overhead
+                                     // over a phone's wifi link.
 
 pub struct FileServiceImpl {
     root: PathBuf,
@@ -390,8 +390,11 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir()
-            .join(format!("nexus-test-clocks-{}-{}.json", std::process::id(), n));
+        let path = std::env::temp_dir().join(format!(
+            "nexus-test-clocks-{}-{}.json",
+            std::process::id(),
+            n
+        ));
         let _ = std::fs::remove_file(&path);
         std::sync::Arc::new(ClockStore::open(path).unwrap())
     }
@@ -540,7 +543,12 @@ mod tests {
 
         // host writes v2 on top of the client's version: {dell:1,host:1} dominates {dell:1}
         let r2 = s
-            .write_file(write_req("f.txt", b"v2", &[("dell", 1), ("host", 1)], "host"))
+            .write_file(write_req(
+                "f.txt",
+                b"v2",
+                &[("dell", 1), ("host", 1)],
+                "host",
+            ))
             .await
             .unwrap()
             .into_inner();
@@ -550,7 +558,10 @@ mod tests {
             "dominance must resolve cleanly, not as a conflict"
         );
         assert_eq!(std::fs::read(dir.path().join("f.txt")).unwrap(), b"v2");
-        assert!(conflict_files(dir.path()).is_empty(), "no conflict file expected");
+        assert!(
+            conflict_files(dir.path()).is_empty(),
+            "no conflict file expected"
+        );
     }
 
     // Test 3: genuine concurrent edit — host and client both advance from the
@@ -566,7 +577,12 @@ mod tests {
             .unwrap();
         // host edits on top of base -> {dell:1, host:1}
         let rh = s
-            .write_file(write_req("f.txt", b"host-edit", &[("dell", 1), ("host", 1)], "host"))
+            .write_file(write_req(
+                "f.txt",
+                b"host-edit",
+                &[("dell", 1), ("host", 1)],
+                "host",
+            ))
             .await
             .unwrap()
             .into_inner();
@@ -587,7 +603,10 @@ mod tests {
         );
         assert!(!rc.conflict_path.is_empty());
         // original is untouched (still the host's version)
-        assert_eq!(std::fs::read(dir.path().join("f.txt")).unwrap(), b"host-edit");
+        assert_eq!(
+            std::fs::read(dir.path().join("f.txt")).unwrap(),
+            b"host-edit"
+        );
         // the incoming version is preserved in the conflict copy
         assert_eq!(
             std::fs::read(dir.path().join(&rc.conflict_path)).unwrap(),

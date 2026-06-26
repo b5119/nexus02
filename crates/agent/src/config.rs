@@ -33,8 +33,8 @@ impl AgentConfig {
         if path.exists() {
             let raw = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading config at {path:?}"))?;
-            let mut cfg: AgentConfig = serde_json::from_str(&raw)
-                .with_context(|| "parsing existing agent config")?;
+            let mut cfg: AgentConfig =
+                serde_json::from_str(&raw).with_context(|| "parsing existing agent config")?;
 
             // Migrate pre-auth configs: backfill a token and persist it so it
             // stays stable across restarts (a client paired once keeps working).
