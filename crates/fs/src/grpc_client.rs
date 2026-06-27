@@ -11,8 +11,8 @@
 use anyhow::{Context, Result};
 use nexus_proto::fs::v1::FileEntry;
 use nexus_proto::fs::v1::{
-    file_service_client::FileServiceClient, ListDirRequest, ReadFileRequest, StatRequest,
-    WriteFileRequest, WriteFileResponse,
+    file_service_client::FileServiceClient, DeleteFileRequest, DeleteFileResponse, ListDirRequest,
+    ReadFileRequest, StatRequest, WriteFileRequest, WriteFileResponse,
 };
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
@@ -150,6 +150,27 @@ impl RemoteFs {
             .write_file(self.authed(WriteFileRequest {
                 path: path.to_string(),
                 data,
+                clock: Some(nexus_proto::fs::v1::VectorClock {
+                    counters: clock.0.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                }),
+                writer_device_id: writer_device_id.to_string(),
+            }))
+            .await?;
+        Ok(resp.into_inner())
+    }
+
+    /// Deletes `path` on the host, carrying this client's vector clock. The host
+    /// records a tombstone and detects delete-vs-edit conflicts (ADR 0008).
+    pub async fn delete_file(
+        &self,
+        path: &str,
+        clock: &nexus_common::VectorClock,
+        writer_device_id: &str,
+    ) -> Result<DeleteFileResponse> {
+        let mut client = self.client.clone();
+        let resp = client
+            .delete_file(self.authed(DeleteFileRequest {
+                path: path.to_string(),
                 clock: Some(nexus_proto::fs::v1::VectorClock {
                     counters: clock.0.iter().map(|(k, v)| (k.clone(), *v)).collect(),
                 }),

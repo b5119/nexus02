@@ -74,8 +74,8 @@ formats into smarter handling, but that's additive, not the baseline.)
 - **Directory-level conflicts** are not modeled — clocks are per file path. Two
   devices concurrently creating different entries in the same directory, or
   concurrent renames, are not detected as directory conflicts.
-- **Delete-vs-edit** is not handled. There is no tombstone/clock for deletions,
-  so "device A deletes while device B edits" is not detected as a conflict.
+- ~~**Delete-vs-edit** is not handled.~~ **RESOLVED in ADR 0008** (tombstones):
+  "device A deletes while device B edits" is now detected and the file is kept.
 - **Rename/move** is treated as unrelated paths (no identity tracking across a
   rename), so an edit-vs-rename race is invisible.
 - **Clock GC / compaction** — clocks accumulate device ids forever; no pruning
