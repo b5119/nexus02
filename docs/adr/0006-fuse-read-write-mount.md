@@ -56,9 +56,11 @@ safely preserved server-side) — see "new gaps" for why.
 - New file written through the mount lands on the host with clock `{client:1}`.
 - Same device overwriting its own file → clean update, clock advances to
   `{client:2}`, no conflict (client clock adoption works).
-- Two mounts = two devices: device B writing a file it never synced is
-  concurrent with device A's version → `.conflict-<B>-<ts>` created, original
-  (A's) untouched — the ADR-0005 conflict result, now proven through FUSE.
+- Two independent client identities (two mounts, two DeviceIds) on one Linux
+  machine: client B writing a file it never synced is concurrent with client A's
+  version → `.conflict-<B>-<ts>` created, original (A's) untouched — the
+  ADR-0005 conflict result, now proven through FUSE. (Two *mounts*, one box, one
+  agent — not two physical machines; that's a manual run, not a committed test.)
 
 ## New gaps this surfaced (named, not papered over)
 - ~~**Reads don't sync clocks.**~~ **RESOLVED in ADR 0007.** `Stat` now carries
