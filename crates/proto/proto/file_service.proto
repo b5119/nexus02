@@ -19,6 +19,10 @@ service FileService {
   // or (on concurrent edits) keeps both — see ADR 0005. Unary/whole-file for
   // now; large-file streaming is a future refinement.
   rpc WriteFile (WriteFileRequest) returns (WriteFileResponse);
+
+  // Delete a file, carrying the deleter's vector clock. The host records a
+  // tombstone and detects delete-vs-edit conflicts — see ADR 0008.
+  rpc DeleteFile (DeleteFileRequest) returns (DeleteFileResponse);
 }
 
 message ListDirRequest {
@@ -88,4 +92,30 @@ message WriteFileResponse {
   VectorClock clock = 2;
   // Relative path of the conflict copy, set only when result == CONFLICT.
   string conflict_path = 3;
+}
+
+message DeleteFileRequest {
+  string path = 1;
+  // The deleter's clock for this file AFTER incrementing its own counter.
+  VectorClock clock = 2;
+  // Which device is performing the delete.
+  string writer_device_id = 3;
+}
+
+message DeleteFileResponse {
+  enum Result {
+    // Delete applied: file removed, a tombstone recorded.
+    DELETED = 0;
+    // Stale delete (the file has edits the deleter hadn't seen): ignored.
+    STALE = 1;
+    // Concurrent delete-vs-edit: the file is KEPT (the edit wins, data is
+    // preserved) and the conflict is logged — see ADR 0008.
+    CONFLICT = 2;
+    // Nothing to delete (already gone / never existed).
+    NOT_FOUND = 3;
+  }
+  Result result = 1;
+  // The authoritative clock for `path` after this operation (the tombstone
+  // clock on DELETED, the live clock otherwise).
+  VectorClock clock = 2;
 }

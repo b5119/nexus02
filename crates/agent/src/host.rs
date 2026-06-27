@@ -16,9 +16,11 @@
 use anyhow::Result;
 use nexus_common::{ClockOrder, ClockStore, VectorClock};
 use nexus_proto::fs::v1::{
+    delete_file_response,
     file_service_server::{FileService, FileServiceServer},
-    write_file_response, FileEntry, ListDirRequest, ListDirResponse, ReadFileChunk,
-    ReadFileRequest, StatRequest, StatResponse, WriteFileRequest, WriteFileResponse,
+    write_file_response, DeleteFileRequest, DeleteFileResponse, FileEntry, ListDirRequest,
+    ListDirResponse, ReadFileChunk, ReadFileRequest, StatRequest, StatResponse, WriteFileRequest,
+    WriteFileResponse,
 };
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -39,12 +41,17 @@ const CHUNK_SIZE: usize = 64 * 1024; // 64KiB — small enough to keep memory fl
 
 pub struct FileServiceImpl {
     root: PathBuf,
-    /// Per-file vector clocks (path -> clock). Shared, internally synchronized.
+    /// Per-file vector clocks for LIVE files (path -> clock).
     clocks: Arc<ClockStore>,
-    /// Serializes the read-compare-write critical section of WriteFile so two
-    /// concurrent writes to the same path can't interleave and corrupt the
-    /// conflict decision. Coarse (one writer at a time, any path) but correct;
-    /// see ADR 0005 for the scalability note.
+    /// Tombstones for DELETED files (path -> the clock at delete time). A path
+    /// lives in exactly one of `clocks` (live) or `tombstones` (deleted); this
+    /// is what lets a later concurrent edit be detected instead of silently
+    /// resurrecting the file. See ADR 0008.
+    tombstones: Arc<ClockStore>,
+    /// Serializes the read-compare-apply critical section of WriteFile/DeleteFile
+    /// so two concurrent ops on the same path can't interleave and corrupt the
+    /// conflict decision. Coarse (one mutating op at a time, any path) but
+    /// correct; see ADR 0005 for the scalability note.
     write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -251,6 +258,51 @@ impl FileService for FileServiceImpl {
         // same path can't race on the conflict decision (ADR 0005).
         let _guard = self.write_lock.lock().await;
 
+        // If the path was deleted (tombstoned), this write either resurrects it
+        // (the writer had seen the delete) or is a delete-vs-edit conflict.
+        // Either way the data-preserving outcome is to KEEP the edited file —
+        // see ADR 0008.
+        let tombstone = self.tombstones.get(&key);
+        if !tombstone.0.is_empty() {
+            let dest = self.resolve_for_write(&req.path)?;
+            let is_conflict = matches!(incoming.compare(&tombstone), ClockOrder::Concurrent);
+
+            // Stale write (predates the delete) — the delete is newer, stays dead.
+            if matches!(incoming.compare(&tombstone), ClockOrder::DominatedBy) {
+                tracing::warn!(path = %req.path, "ignoring stale write to a deleted file (the delete is newer)");
+                return Ok(Response::new(WriteFileResponse {
+                    result: write_file_response::Result::Stale as i32,
+                    clock: Some(clock_to_proto(&tombstone)),
+                    conflict_path: String::new(),
+                }));
+            }
+
+            // Dominates/Equal (intentional resurrect) OR Concurrent (delete-vs-edit
+            // conflict): write the edited content, drop the tombstone, go live.
+            tokio::fs::write(&dest, &req.data)
+                .await
+                .map_err(|e| Status::internal(format!("write failed: {e}")))?;
+            let merged = tombstone.merge(&incoming);
+            self.tombstones
+                .remove(&key)
+                .map_err(|e| Status::internal(format!("clearing tombstone failed: {e}")))?;
+            self.clocks
+                .put(&key, merged.clone())
+                .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
+            if is_conflict {
+                tracing::warn!(path = %req.path, "delete-vs-edit conflict — kept the edited file (data preserved)");
+            }
+            return Ok(Response::new(WriteFileResponse {
+                result: if is_conflict {
+                    write_file_response::Result::Conflict as i32
+                } else {
+                    write_file_response::Result::Applied as i32
+                },
+                clock: Some(clock_to_proto(&merged)),
+                conflict_path: String::new(),
+            }));
+        }
+
         let stored = self.clocks.get(&key);
         let dest = self.resolve_for_write(&req.path)?;
 
@@ -313,6 +365,82 @@ impl FileService for FileServiceImpl {
             }
         }
     }
+
+    async fn delete_file(
+        &self,
+        request: Request<DeleteFileRequest>,
+    ) -> Result<Response<DeleteFileResponse>, Status> {
+        let req = request.into_inner();
+        let key = Self::clock_key(&req.path);
+        if key.is_empty() {
+            return Err(Status::invalid_argument("cannot delete the root path"));
+        }
+        let incoming = clock_from_proto(&req.clock);
+
+        let _guard = self.write_lock.lock().await;
+
+        // Already deleted — idempotent; just advance the tombstone clock.
+        let tombstone = self.tombstones.get(&key);
+        if !tombstone.0.is_empty() {
+            let merged = tombstone.merge(&incoming);
+            self.tombstones
+                .put(&key, merged.clone())
+                .map_err(|e| Status::internal(format!("persisting tombstone failed: {e}")))?;
+            return Ok(Response::new(DeleteFileResponse {
+                result: delete_file_response::Result::Deleted as i32,
+                clock: Some(clock_to_proto(&merged)),
+            }));
+        }
+
+        let stored = self.clocks.get(&key);
+
+        // The file must exist to delete it; if it's already gone, nothing to do.
+        let dest = match self.resolve(&req.path) {
+            Ok(p) => p,
+            Err(_) => {
+                return Ok(Response::new(DeleteFileResponse {
+                    result: delete_file_response::Result::NotFound as i32,
+                    clock: Some(clock_to_proto(&stored)),
+                }));
+            }
+        };
+
+        match incoming.compare(&stored) {
+            // Deleter saw the latest (or the file was untracked): delete + tombstone.
+            ClockOrder::Dominates | ClockOrder::Equal => {
+                tokio::fs::remove_file(&dest)
+                    .await
+                    .map_err(|e| Status::internal(format!("delete failed: {e}")))?;
+                let merged = stored.merge(&incoming);
+                self.clocks
+                    .remove(&key)
+                    .map_err(|e| Status::internal(format!("clearing clock failed: {e}")))?;
+                self.tombstones
+                    .put(&key, merged.clone())
+                    .map_err(|e| Status::internal(format!("persisting tombstone failed: {e}")))?;
+                Ok(Response::new(DeleteFileResponse {
+                    result: delete_file_response::Result::Deleted as i32,
+                    clock: Some(clock_to_proto(&merged)),
+                }))
+            }
+            // Stale delete: the file has edits the deleter never saw. Keep it.
+            ClockOrder::DominatedBy => {
+                tracing::warn!(path = %req.path, "ignoring stale delete (file has a newer version)");
+                Ok(Response::new(DeleteFileResponse {
+                    result: delete_file_response::Result::Stale as i32,
+                    clock: Some(clock_to_proto(&stored)),
+                }))
+            }
+            // Concurrent delete-vs-edit: keep the file (the edit wins; ADR 0008).
+            ClockOrder::Concurrent => {
+                tracing::warn!(path = %req.path, "delete-vs-edit conflict — keeping the file (concurrent edit preserved)");
+                Ok(Response::new(DeleteFileResponse {
+                    result: delete_file_response::Result::Conflict as i32,
+                    clock: Some(clock_to_proto(&stored)),
+                }))
+            }
+        }
+    }
 }
 
 fn clock_to_proto(c: &VectorClock) -> nexus_proto::fs::v1::VectorClock {
@@ -349,14 +477,16 @@ pub async fn run(serve_dir: String, port: u16, auth_token: String) -> Result<()>
 
     std::fs::create_dir_all(&root)?;
 
-    // Per-file vector clocks live next to the rest of the agent's state.
-    let clocks_path = crate::config::config_dir()?.join("clocks.json");
-    let clocks = Arc::new(ClockStore::open(clocks_path)?);
+    // Per-file vector clocks (live + tombstones) live next to the agent's state.
+    let cfg_dir = crate::config::config_dir()?;
+    let clocks = Arc::new(ClockStore::open(cfg_dir.join("clocks.json"))?);
+    let tombstones = Arc::new(ClockStore::open(cfg_dir.join("tombstones.json"))?);
 
     let addr = format!("0.0.0.0:{port}").parse()?;
     let service = FileServiceImpl {
         root,
         clocks,
+        tombstones,
         write_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -409,6 +539,7 @@ mod tests {
         FileServiceImpl {
             root: root.canonicalize().unwrap(),
             clocks: temp_store(),
+            tombstones: temp_store(),
             write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -432,6 +563,14 @@ mod tests {
         Request::new(WriteFileRequest {
             path: path.to_string(),
             data: data.to_vec(),
+            clock: pclock(clock),
+            writer_device_id: writer.to_string(),
+        })
+    }
+
+    fn delete_req(path: &str, clock: &[(&str, u64)], writer: &str) -> Request<DeleteFileRequest> {
+        Request::new(DeleteFileRequest {
+            path: path.to_string(),
             clock: pclock(clock),
             writer_device_id: writer.to_string(),
         })
@@ -659,5 +798,185 @@ mod tests {
             .into_inner();
         assert!(r2.found);
         assert_eq!(clock_from_proto(&r2.clock), VectorClock::new());
+    }
+
+    // ---- delete-vs-edit (ADR 0008) ------------------------------------------
+
+    fn exists(dir: &std::path::Path, name: &str) -> bool {
+        dir.join(name).exists()
+    }
+
+    // Clean delete: the deleter's clock dominates the file's -> file removed, a
+    // tombstone is recorded.
+    #[tokio::test]
+    async fn delete_clean_records_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        s.write_file(write_req("f.txt", b"v1", &[("dell", 1)], "dell"))
+            .await
+            .unwrap();
+
+        let r = s
+            .delete_file(delete_req("f.txt", &[("dell", 2)], "dell"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r.result, delete_file_response::Result::Deleted as i32);
+        assert!(!exists(dir.path(), "f.txt"), "file should be gone");
+        assert_eq!(
+            s.tombstones.get("f.txt").get("dell"),
+            2,
+            "tombstone recorded"
+        );
+        assert_eq!(
+            s.clocks.get("f.txt"),
+            VectorClock::new(),
+            "live clock cleared"
+        );
+    }
+
+    // Stale delete: the delete clock is dominated by the file's current clock
+    // (the deleter never saw the latest edit) -> ignored, file kept.
+    #[tokio::test]
+    async fn delete_stale_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        s.write_file(write_req("f.txt", b"v1", &[("dell", 1)], "dell"))
+            .await
+            .unwrap();
+        s.write_file(write_req("f.txt", b"v2", &[("dell", 2)], "dell"))
+            .await
+            .unwrap();
+
+        let r = s
+            .delete_file(delete_req("f.txt", &[("dell", 1)], "dell"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r.result, delete_file_response::Result::Stale as i32);
+        assert!(
+            exists(dir.path(), "f.txt"),
+            "stale delete must not remove the file"
+        );
+    }
+
+    // Concurrent delete-vs-edit (delete arrives): the file has an edit the
+    // deleter never saw -> CONFLICT, file KEPT (the edit wins).
+    #[tokio::test]
+    async fn delete_concurrent_with_edit_keeps_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        s.write_file(write_req("f.txt", b"v1", &[("dell", 1)], "dell"))
+            .await
+            .unwrap();
+        // dell edits again -> host at {dell:2}
+        s.write_file(write_req("f.txt", b"v2", &[("dell", 2)], "dell"))
+            .await
+            .unwrap();
+        // phone deletes based on its stale view {dell:1} -> {dell:1, phone:1},
+        // concurrent with {dell:2}
+        let r = s
+            .delete_file(delete_req("f.txt", &[("dell", 1), ("phone", 1)], "phone"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r.result, delete_file_response::Result::Conflict as i32);
+        assert!(
+            exists(dir.path(), "f.txt"),
+            "concurrent edit must be preserved"
+        );
+        assert_eq!(std::fs::read(dir.path().join("f.txt")).unwrap(), b"v2");
+        assert_eq!(
+            s.tombstones.get("f.txt"),
+            VectorClock::new(),
+            "no tombstone on conflict"
+        );
+    }
+
+    // Concurrent edit-vs-delete (edit arrives after a tombstone): resurrect the
+    // file with the edited content, CONFLICT.
+    #[tokio::test]
+    async fn write_concurrent_with_tombstone_resurrects() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        s.write_file(write_req("f.txt", b"v1", &[("dell", 1)], "dell"))
+            .await
+            .unwrap();
+        s.delete_file(delete_req("f.txt", &[("dell", 2)], "dell"))
+            .await
+            .unwrap();
+        assert!(!exists(dir.path(), "f.txt"));
+
+        // phone edits from its stale view {dell:1} -> {dell:1, phone:1},
+        // concurrent with the tombstone {dell:2}
+        let r = s
+            .write_file(write_req(
+                "f.txt",
+                b"phone-edit",
+                &[("dell", 1), ("phone", 1)],
+                "phone",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r.result, write_file_response::Result::Conflict as i32);
+        assert!(
+            exists(dir.path(), "f.txt"),
+            "edit should resurrect the file"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("f.txt")).unwrap(),
+            b"phone-edit"
+        );
+        assert_eq!(
+            s.tombstones.get("f.txt"),
+            VectorClock::new(),
+            "tombstone cleared"
+        );
+    }
+
+    // Intentional resurrect: an edit that dominates the tombstone (the writer
+    // saw the delete and writes anyway) recreates the file, no conflict.
+    #[tokio::test]
+    async fn write_dominating_tombstone_resurrects_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        s.write_file(write_req("f.txt", b"v1", &[("dell", 1)], "dell"))
+            .await
+            .unwrap();
+        s.delete_file(delete_req("f.txt", &[("dell", 2)], "dell"))
+            .await
+            .unwrap();
+        let r = s
+            .write_file(write_req("f.txt", b"recreated", &[("dell", 3)], "dell"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r.result, write_file_response::Result::Applied as i32);
+        assert!(exists(dir.path(), "f.txt"));
+        assert_eq!(s.tombstones.get("f.txt"), VectorClock::new());
+    }
+
+    // A stale write to a deleted file (predates the delete) stays dead.
+    #[tokio::test]
+    async fn write_stale_to_tombstone_stays_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        s.write_file(write_req("f.txt", b"v1", &[("dell", 1)], "dell"))
+            .await
+            .unwrap();
+        s.delete_file(delete_req("f.txt", &[("dell", 2)], "dell"))
+            .await
+            .unwrap();
+        let r = s
+            .write_file(write_req("f.txt", b"stale", &[("dell", 1)], "dell"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r.result, write_file_response::Result::Stale as i32);
+        assert!(
+            !exists(dir.path(), "f.txt"),
+            "stale write must not resurrect"
+        );
     }
 }

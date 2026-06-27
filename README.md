@@ -113,7 +113,9 @@ cross-compiled binary you can push via `adb` for testing.
       then editing it no longer false-conflicts — the client syncs the clock on
       a read-intent open ([docs/adr/0007](docs/adr/0007-read-open-clock-sync.md)),
       while a blind overwrite of a changed file still conflicts. Remaining gaps
-      named in the ADRs (no delete/rename/dir conflicts yet).
+      named in the ADRs. Deletes are supported with **delete-vs-edit conflict
+      detection** (tombstones — [docs/adr/0008](docs/adr/0008-delete-vs-edit-conflicts.md));
+      rename and directory-level conflicts are still open.
 - [ ] Full pairing / control plane (device identity, revocation, key rotation)
       — ADR 0004 is only the shared-secret step, not this
 - [ ] Layer 1 (remote control / streaming) — not started

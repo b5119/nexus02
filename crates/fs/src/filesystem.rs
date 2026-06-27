@@ -38,7 +38,7 @@ use fuser::{
 };
 use lru::LruCache;
 use nexus_common::{ClockStore, VectorClock};
-use nexus_proto::fs::v1::write_file_response;
+use nexus_proto::fs::v1::{delete_file_response, write_file_response};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
@@ -679,6 +679,55 @@ impl Filesystem for NexusFuse {
                 Err(_) => reply.error(libc::EIO),
             },
             None => reply.ok(),
+        }
+    }
+
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, reply: ReplyEmpty) {
+        let parent_path = {
+            let mut table = self.inodes.lock().unwrap();
+            match table.path_for_ino(parent) {
+                Some(p) => p,
+                None => return reply.error(libc::ENOENT),
+            }
+        };
+        let name_str = name.to_string_lossy().to_string();
+        let path = if parent_path == "/" {
+            format!("/{name_str}")
+        } else {
+            format!("{parent_path}/{name_str}")
+        };
+
+        // Stamp this client's counter and send the delete; the host applies the
+        // tombstone / delete-vs-edit policy (ADR 0008).
+        let mut clock = self.client_clocks.get(&path);
+        clock.increment(&self.device_id);
+        let resp = self
+            .runtime
+            .block_on(self.client.delete_file(&path, &clock, &self.device_id));
+
+        match resp {
+            Ok(r) => {
+                // Adopt the host's authoritative clock; drop any local buffer.
+                let host_clock = proto_to_clock(&r.clock);
+                let _ = self.client_clocks.put(&path, clock.merge(&host_clock));
+                if let Some(ino) = self.inodes.lock().unwrap().peek_ino(&path) {
+                    self.write_buffers.lock().unwrap().remove(&ino);
+                }
+                if r.result == delete_file_response::Result::Conflict as i32 {
+                    tracing::warn!(
+                        %path,
+                        "delete conflicted with a concurrent edit — the host kept the file \
+                         (it will reappear on the next lookup)"
+                    );
+                }
+                // The local `rm` succeeds either way; on CONFLICT/STALE the host
+                // keeps the file and it reappears on the next lookup.
+                reply.ok();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, %path, "delete failed");
+                reply.error(libc::EIO);
+            }
         }
     }
 }

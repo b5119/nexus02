@@ -76,10 +76,9 @@ safely preserved server-side) — see "new gaps" for why.
   the inode-table work can still evict an inode the kernel references; with
   writes in play this is the same trade-off as before (a stale-handle error on
   that one entry), not made worse, but not fixed either.
-- **No `unlink`/`mkdir`/`rmdir`/`rename`.** Only file `create`/`write`/truncate.
-  Deleting or renaming through the mount is unsupported, which also means
-  delete-vs-edit and rename conflicts (already out of scope in ADR 0005) stay
-  out of scope here.
+- **No `mkdir`/`rmdir`/`rename`.** `unlink` (file delete) is now supported with
+  delete-vs-edit conflict detection — see **ADR 0008**. Directory operations and
+  rename are still unsupported, so rename conflicts stay out of scope.
 - **Whole-file buffering in memory.** A write opens and buffers the entire file;
   fine for the small files we target, not for very large ones. Streaming
   write-back is a future refinement (same note as `WriteFile` being unary).

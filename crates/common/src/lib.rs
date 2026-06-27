@@ -206,6 +206,16 @@ impl ClockStore {
         map.insert(key.to_string(), clock);
         persist(&self.path, &map)
     }
+
+    /// Remove `key` (if present) and persist. Used to move a path between the
+    /// live-clock store and the tombstone store (ADR 0008).
+    pub fn remove(&self, key: &str) -> std::io::Result<()> {
+        let mut map = self.inner.lock().unwrap();
+        if map.remove(key).is_some() {
+            persist(&self.path, &map)?;
+        }
+        Ok(())
+    }
 }
 
 fn persist(path: &std::path::Path, map: &BTreeMap<String, VectorClock>) -> std::io::Result<()> {
