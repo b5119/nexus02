@@ -18,12 +18,17 @@ updates:
       # and ADRs); a major bump needs a coordinated, hand-done upgrade, not a
       # one-line Dependabot PR — so ignore *major* bumps here and track them as
       # issues when we actually want them. Patch/minor still flow normally.
-      #   tonic / tonic-build 0.12 — TLS feature was renamed in 0.13+ (ADR 0004)
+      #   tonic / tonic-build / prost / prost-build 0.12/0.13 — these move in
+      #     lockstep; a tonic major upgrade also renamed the TLS feature (ADR 0004)
       #   fuser 0.15            — FUSE Filesystem trait signatures change on major
       #   rcgen 0.13            — 0.14 defaults to aws-lc (needs cmake) + renames fields
       - dependency-name: "tonic"
         update-types: ["version-update:semver-major"]
       - dependency-name: "tonic-build"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "prost"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "prost-build"
         update-types: ["version-update:semver-major"]
       - dependency-name: "fuser"
         update-types: ["version-update:semver-major"]
