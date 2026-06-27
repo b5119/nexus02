@@ -83,14 +83,19 @@ message WriteFileResponse {
     // Incoming clock was stale (host already had a dominating version):
     // not applied, client should pull the host's newer version.
     STALE = 1;
-    // Concurrent edit: original kept untouched, incoming written to a
-    // `.conflict-<device>-<ts>` sibling. conflict_path is set.
+    // Concurrent conflict. Two shapes, distinguished by conflict_path:
+    //  - edit-vs-edit: original kept untouched, incoming written to a
+    //    `.conflict-<device>-<ts>` sibling; conflict_path is set.
+    //  - delete-vs-edit (the path was tombstoned): the file is resurrected
+    //    with the incoming edit and conflict_path is EMPTY (no sibling) —
+    //    see ADR 0008.
     CONFLICT = 2;
   }
   Result result = 1;
   // The authoritative clock for `path` after this operation.
   VectorClock clock = 2;
-  // Relative path of the conflict copy, set only when result == CONFLICT.
+  // Relative path of the conflict copy. Set only for an edit-vs-edit CONFLICT;
+  // empty for a delete-vs-edit CONFLICT (see the Result.CONFLICT note).
   string conflict_path = 3;
 }
 

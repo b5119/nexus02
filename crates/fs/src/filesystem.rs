@@ -265,11 +265,21 @@ impl NexusFuse {
 
         let conflict = resp.result == write_file_response::Result::Conflict as i32;
         if conflict {
-            tracing::warn!(
-                %path,
-                conflict = %resp.conflict_path,
-                "host reported a CONFLICT — both versions kept (see the .conflict-* file)"
-            );
+            if resp.conflict_path.is_empty() {
+                // delete-vs-edit: this edit resurrected a concurrently-deleted
+                // file — no sibling copy exists (ADR 0008).
+                tracing::warn!(
+                    %path,
+                    "delete-vs-edit conflict — this edit resurrected a concurrently-deleted file"
+                );
+            } else {
+                // edit-vs-edit: both versions kept, incoming saved as a sibling.
+                tracing::warn!(
+                    %path,
+                    conflict = %resp.conflict_path,
+                    "edit conflict — both versions kept (see the .conflict-* file)"
+                );
+            }
         }
         Ok(conflict)
     }
@@ -713,15 +723,23 @@ impl Filesystem for NexusFuse {
                 if let Some(ino) = self.inodes.lock().unwrap().peek_ino(&path) {
                     self.write_buffers.lock().unwrap().remove(&ino);
                 }
+                // On CONFLICT or STALE the host keeps the file, so the local `rm`
+                // appears to succeed but the file reappears on the next lookup —
+                // warn either way so that isn't a silent surprise (ADR 0008).
                 if r.result == delete_file_response::Result::Conflict as i32 {
                     tracing::warn!(
                         %path,
                         "delete conflicted with a concurrent edit — the host kept the file \
                          (it will reappear on the next lookup)"
                     );
+                } else if r.result == delete_file_response::Result::Stale as i32 {
+                    tracing::warn!(
+                        %path,
+                        "delete was stale (the file has newer edits) — the host kept it \
+                         (it will reappear on the next lookup)"
+                    );
                 }
-                // The local `rm` succeeds either way; on CONFLICT/STALE the host
-                // keeps the file and it reappears on the next lookup.
+                // The local `rm` succeeds either way.
                 reply.ok();
             }
             Err(e) => {

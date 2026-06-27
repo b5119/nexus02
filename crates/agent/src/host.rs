@@ -397,12 +397,17 @@ impl FileService for FileServiceImpl {
         // The file must exist to delete it; if it's already gone, nothing to do.
         let dest = match self.resolve(&req.path) {
             Ok(p) => p,
-            Err(_) => {
+            // The file is genuinely gone (canonicalize couldn't find it) —
+            // nothing to delete.
+            Err(status) if status.code() == tonic::Code::NotFound => {
                 return Ok(Response::new(DeleteFileResponse {
                     result: delete_file_response::Result::NotFound as i32,
                     clock: Some(clock_to_proto(&stored)),
                 }));
             }
+            // A real rejection (e.g. a path-escape attempt is permission_denied)
+            // — propagate it rather than masking it as NOT_FOUND.
+            Err(status) => return Err(status),
         };
 
         match incoming.compare(&stored) {
@@ -412,12 +417,15 @@ impl FileService for FileServiceImpl {
                     .await
                     .map_err(|e| Status::internal(format!("delete failed: {e}")))?;
                 let merged = stored.merge(&incoming);
-                self.clocks
-                    .remove(&key)
-                    .map_err(|e| Status::internal(format!("clearing clock failed: {e}")))?;
+                // Persist the tombstone BEFORE clearing the live clock: if the
+                // second op fails, the path is in both stores, and both handlers
+                // check tombstones first, so it degrades safely to "deleted".
                 self.tombstones
                     .put(&key, merged.clone())
                     .map_err(|e| Status::internal(format!("persisting tombstone failed: {e}")))?;
+                self.clocks
+                    .remove(&key)
+                    .map_err(|e| Status::internal(format!("clearing clock failed: {e}")))?;
                 Ok(Response::new(DeleteFileResponse {
                     result: delete_file_response::Result::Deleted as i32,
                     clock: Some(clock_to_proto(&merged)),
@@ -977,6 +985,32 @@ mod tests {
         assert!(
             !exists(dir.path(), "f.txt"),
             "stale write must not resurrect"
+        );
+    }
+
+    // A delete that escapes the served root must be rejected as permission_denied,
+    // not masked as NOT_FOUND.
+    #[tokio::test]
+    async fn delete_rejects_path_escape() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("share");
+        std::fs::create_dir(&root).unwrap();
+        // a real file just outside the served root
+        std::fs::write(parent.path().join("secret.txt"), b"s").unwrap();
+        let s = svc(&root);
+
+        let err = s
+            .delete_file(delete_req("../secret.txt", &[("dell", 1)], "dell"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::PermissionDenied,
+            "path escape must be denied, not reported NOT_FOUND"
+        );
+        assert!(
+            parent.path().join("secret.txt").exists(),
+            "the outside file must be untouched"
         );
     }
 }
