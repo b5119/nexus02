@@ -106,8 +106,9 @@ cross-compiled binary you can push via `adb` for testing.
 - [x] **Multi-writer conflict detection (vector clocks)** — every file carries
       a vector clock; concurrent edits are detected and BOTH kept
       (`.conflict-*`), never silently merged or lost. Proven at the protocol
-      level and through the actual read-write mount (two devices editing the
-      same file → conflict file, original untouched). See
+      level and through the actual read-write mount (two independent client
+      identities — two mounts on one machine — editing the same file → conflict
+      file, original untouched). See
       [docs/adr/0005](docs/adr/0005-vector-clock-conflict-detection.md) +
       [docs/adr/0006](docs/adr/0006-fuse-read-write-mount.md). Reading a file
       then editing it no longer false-conflicts — the client syncs the clock on
