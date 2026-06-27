@@ -23,6 +23,18 @@ the commit history and the ADRs in [`docs/adr/`](docs/adr/) — is the canonical
 record of how the work was split. It's stated up front because it's relevant to
 how you should read the code and the claims here.
 
+### Code review
+
+Every PR is reviewed by two automated reviewers — [CodeRabbit](https://coderabbit.ai)
+and GitHub Copilot — before it merges. Their findings are evaluated on merit,
+not rubber-stamped: valid ones are fixed and the threads resolved, off-base ones
+are declined with a reason. They've caught real issues here — for example a CI
+credential-leak hardening gap (persisted GitHub token + unpinned actions, flagged
+by CodeRabbit) and a security-relevant bug where `DeleteFile` masked a
+path-escape rejection as a plain "not found" (flagged by Copilot, fixed + tested).
+So bot review is a genuine part of the quality bar, alongside the CI gates
+(build + test, fmt, clippy) and branch protection on `main`.
+
 ## Current milestone: Layer 2 (filesystem virtualization)
 
 Goal: mount a phone's storage on a Linux laptop as a real, lazy-loaded
