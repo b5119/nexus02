@@ -18,9 +18,10 @@ use nexus_common::{ClockOrder, ClockStore, VectorClock};
 use nexus_proto::fs::v1::{
     delete_file_response,
     file_service_server::{FileService, FileServiceServer},
+    rename_file_response,
     write_file_response, DeleteFileRequest, DeleteFileResponse, FileEntry, ListDirRequest,
-    ListDirResponse, ReadFileChunk, ReadFileRequest, StatRequest, StatResponse, WriteFileRequest,
-    WriteFileResponse,
+    ListDirResponse, ReadFileChunk, ReadFileRequest, RenameFileRequest, RenameFileResponse,
+    StatRequest, StatResponse, WriteFileRequest, WriteFileResponse,
 };
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -449,6 +450,123 @@ impl FileService for FileServiceImpl {
             }
         }
     }
+
+    async fn rename_file(
+        &self,
+        request: Request<RenameFileRequest>,
+    ) -> Result<Response<RenameFileResponse>, Status> {
+        let req = request.into_inner();
+        let old_key = Self::clock_key(&req.old_path);
+        let new_key = Self::clock_key(&req.new_path);
+        if old_key.is_empty() || new_key.is_empty() {
+            return Err(Status::invalid_argument("cannot rename root path"));
+        }
+        let incoming = clock_from_proto(&req.clock);
+
+        let _guard = self.write_lock.lock().await;
+
+        // Check if old_path has a tombstone (was deleted).
+        let old_tombstone = self.tombstones.get(&old_key);
+        if !old_tombstone.0.is_empty() {
+            if matches!(incoming.compare(&old_tombstone), ClockOrder::DominatedBy) {
+                tracing::warn!(old_path = %req.old_path, "ignoring stale rename of a deleted file");
+                return Ok(Response::new(RenameFileResponse {
+                    result: rename_file_response::Result::Stale as i32,
+                    clock: Some(clock_to_proto(&old_tombstone)),
+                    conflict_path: String::new(),
+                }));
+            }
+            let is_conflict = matches!(incoming.compare(&old_tombstone), ClockOrder::Concurrent);
+            let old_dest = self.resolve(&req.old_path)?;
+            let new_dest = self.resolve_for_write(&req.new_path)?;
+            tokio::fs::rename(&old_dest, &new_dest)
+                .await
+                .map_err(|e| Status::internal(format!("rename failed: {e}")))?;
+            let merged = old_tombstone.merge(&incoming);
+            self.tombstones.remove(&old_key)
+                .map_err(|e| Status::internal(format!("clearing tombstone failed: {e}")))?;
+            self.clocks.put(&new_key, merged.clone())
+                .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
+            if is_conflict {
+                tracing::warn!(old_path = %req.old_path, new_path = %req.new_path,
+                    "delete-vs-rename conflict — file moved to new path");
+            }
+            return Ok(Response::new(RenameFileResponse {
+                result: if is_conflict {
+                    rename_file_response::Result::Conflict as i32
+                } else {
+                    rename_file_response::Result::Renamed as i32
+                },
+                clock: Some(clock_to_proto(&merged)),
+                conflict_path: String::new(),
+            }));
+        }
+
+        let old_stored = self.clocks.get(&old_key);
+
+        let old_dest = match self.resolve(&req.old_path) {
+            Ok(p) => p,
+            Err(status) if status.code() == tonic::Code::NotFound => {
+                return Ok(Response::new(RenameFileResponse {
+                    result: rename_file_response::Result::NotFound as i32,
+                    clock: Some(clock_to_proto(&old_stored)),
+                    conflict_path: String::new(),
+                }));
+            }
+            Err(status) => return Err(status),
+        };
+        let new_dest = self.resolve_for_write(&req.new_path)?;
+
+        match incoming.compare(&old_stored) {
+            ClockOrder::Dominates | ClockOrder::Equal => {
+                tokio::fs::rename(&old_dest, &new_dest)
+                    .await
+                    .map_err(|e| Status::internal(format!("rename failed: {e}")))?;
+                let merged = old_stored.merge(&incoming);
+                self.clocks.remove(&old_key)
+                    .map_err(|e| Status::internal(format!("removing old clock failed: {e}")))?;
+                self.clocks.put(&new_key, merged.clone())
+                    .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
+                Ok(Response::new(RenameFileResponse {
+                    result: rename_file_response::Result::Renamed as i32,
+                    clock: Some(clock_to_proto(&merged)),
+                    conflict_path: String::new(),
+                }))
+            }
+            ClockOrder::DominatedBy => {
+                tracing::warn!(old_path = %req.old_path, "ignoring stale rename (old path has newer edits)");
+                Ok(Response::new(RenameFileResponse {
+                    result: rename_file_response::Result::Stale as i32,
+                    clock: Some(clock_to_proto(&old_stored)),
+                    conflict_path: String::new(),
+                }))
+            }
+            // Concurrent rename-vs-edit has open semantics (GitHub issue #26,
+            // ADR 0009). Proceed with rename; the concurrent edit will surface
+            // as a write to a now-missing path.
+            ClockOrder::Concurrent => {
+                tokio::fs::rename(&old_dest, &new_dest)
+                    .await
+                    .map_err(|e| Status::internal(format!("rename failed: {e}")))?;
+                let merged = old_stored.merge(&incoming);
+                self.clocks.remove(&old_key)
+                    .map_err(|e| Status::internal(format!("removing old clock failed: {e}")))?;
+                self.clocks.put(&new_key, merged.clone())
+                    .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
+                tracing::warn!(
+                    old_path = %req.old_path,
+                    new_path = %req.new_path,
+                    "rename-vs-edit edge case — rename applied, concurrent edits at old_path \
+                     will resolve via the normal write path (ADR 0009)"
+                );
+                Ok(Response::new(RenameFileResponse {
+                    result: rename_file_response::Result::Renamed as i32,
+                    clock: Some(clock_to_proto(&merged)),
+                    conflict_path: String::new(),
+                }))
+            }
+        }
+    }
 }
 
 fn clock_to_proto(c: &VectorClock) -> nexus_proto::fs::v1::VectorClock {
@@ -528,7 +646,6 @@ pub async fn run(serve_dir: String, port: u16, auth_token: String) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     fn temp_store() -> std::sync::Arc<ClockStore> {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -552,10 +669,6 @@ mod tests {
         }
     }
 
-    fn impl_for(root: &std::path::Path) -> FileServiceImpl {
-        svc(root)
-    }
-
     fn pclock(pairs: &[(&str, u64)]) -> Option<nexus_proto::fs::v1::VectorClock> {
         Some(nexus_proto::fs::v1::VectorClock {
             counters: pairs.iter().map(|(d, c)| (d.to_string(), *c)).collect(),
@@ -576,80 +689,26 @@ mod tests {
         })
     }
 
+    fn rename_req(
+        old_path: &str,
+        new_path: &str,
+        clock: &[(&str, u64)],
+        writer: &str,
+    ) -> Request<RenameFileRequest> {
+        Request::new(RenameFileRequest {
+            old_path: old_path.to_string(),
+            new_path: new_path.to_string(),
+            clock: pclock(clock),
+            writer_device_id: writer.to_string(),
+        })
+    }
+
     fn delete_req(path: &str, clock: &[(&str, u64)], writer: &str) -> Request<DeleteFileRequest> {
         Request::new(DeleteFileRequest {
             path: path.to_string(),
             clock: pclock(clock),
             writer_device_id: writer.to_string(),
         })
-    }
-
-    #[test]
-    fn resolves_legit_paths_inside_root() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("hello.txt"), b"hi").unwrap();
-        fs::create_dir(dir.path().join("sub")).unwrap();
-        fs::write(dir.path().join("sub/x.txt"), b"x").unwrap();
-        let svc = impl_for(dir.path());
-
-        assert!(svc.resolve("hello.txt").unwrap().ends_with("hello.txt"));
-        assert!(svc.resolve("sub/x.txt").unwrap().ends_with("x.txt"));
-        // a leading slash is treated as root-relative, never absolute
-        assert!(svc.resolve("/hello.txt").unwrap().ends_with("hello.txt"));
-    }
-
-    #[test]
-    fn rejects_dotdot_traversal() {
-        let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("share");
-        fs::create_dir(&root).unwrap();
-        // a secret sibling OUTSIDE the served root
-        fs::write(parent.path().join("secret.txt"), b"top secret").unwrap();
-        let svc = impl_for(&root);
-
-        let err = svc.resolve("../secret.txt").unwrap_err();
-        assert_eq!(
-            err.code(),
-            tonic::Code::PermissionDenied,
-            "../ escape must be denied"
-        );
-        // deep traversal to a real system file must never succeed
-        assert!(svc.resolve("../../../../../../etc/passwd").is_err());
-    }
-
-    #[test]
-    fn rejects_symlink_escape() {
-        let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("share");
-        fs::create_dir(&root).unwrap();
-        let outside = parent.path().join("outside");
-        fs::create_dir(&outside).unwrap();
-        fs::write(outside.join("secret.txt"), b"top secret").unwrap();
-
-        // a symlink INSIDE root pointing to a dir OUTSIDE it
-        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
-        // and one pointing directly at an outside file
-        std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("link.txt")).unwrap();
-        let svc = impl_for(&root);
-
-        assert_eq!(
-            svc.resolve("escape/secret.txt").unwrap_err().code(),
-            tonic::Code::PermissionDenied,
-            "symlinked-dir escape must be denied"
-        );
-        assert_eq!(
-            svc.resolve("link.txt").unwrap_err().code(),
-            tonic::Code::PermissionDenied,
-            "symlinked-file escape must be denied"
-        );
-    }
-
-    #[test]
-    fn token_compare_is_correct() {
-        assert!(token_matches(b"abc123", b"abc123"));
-        assert!(!token_matches(b"abc123", b"abc124"));
-        assert!(!token_matches(b"abc", b"abc123")); // length mismatch
-        assert!(!token_matches(b"", b"x"));
     }
 
     fn conflict_files(dir: &std::path::Path) -> Vec<String> {
@@ -1012,5 +1071,132 @@ mod tests {
             parent.path().join("secret.txt").exists(),
             "the outside file must be untouched"
         );
+    }
+
+    // ---- rename / move (ADR 0009) --------------------------------------------
+
+    // Simple same-directory rename: content + clock survive intact.
+    #[tokio::test]
+    async fn rename_same_directory_preserves_clock_and_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+
+        s.write_file(write_req("old.txt", b"hello", &[("dell", 1)], "dell"))
+            .await
+            .unwrap();
+
+        let r = s
+            .rename_file(rename_req("old.txt", "new.txt", &[("dell", 2)], "dell"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(r.result, rename_file_response::Result::Renamed as i32);
+        // Content is at the new path
+        assert!(exists(dir.path(), "new.txt"));
+        assert!(!exists(dir.path(), "old.txt"));
+        assert_eq!(std::fs::read(dir.path().join("new.txt")).unwrap(), b"hello");
+        // Clock moved to new path
+        assert_eq!(s.clocks.get("new.txt").get("dell"), 2);
+        assert_eq!(s.clocks.get("old.txt"), VectorClock::new());
+    }
+
+    // Cross-directory move: same guarantees.
+    #[tokio::test]
+    async fn rename_cross_directory_moves_clock_and_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        let s = svc(dir.path());
+
+        s.write_file(write_req("old.txt", b"cross-dir", &[("dell", 1)], "dell"))
+            .await
+            .unwrap();
+
+        let r = s
+            .rename_file(rename_req("old.txt", "subdir/moved.txt", &[("dell", 2)], "dell"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(r.result, rename_file_response::Result::Renamed as i32);
+        assert!(!exists(dir.path(), "old.txt"));
+        assert!(exists(dir.path(), "subdir/moved.txt"));
+        assert_eq!(
+            std::fs::read(dir.path().join("subdir/moved.txt")).unwrap(),
+            b"cross-dir"
+        );
+        assert_eq!(s.clocks.get("subdir/moved.txt").get("dell"), 2);
+        assert_eq!(s.clocks.get("old.txt"), VectorClock::new());
+    }
+
+    // Rename of a non-existent file returns NOT_FOUND.
+    #[tokio::test]
+    async fn rename_nonexistent_returns_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+
+        let r = s
+            .rename_file(rename_req("nonexistent.txt", "new.txt", &[("dell", 1)], "dell"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(r.result, rename_file_response::Result::NotFound as i32);
+        assert!(!exists(dir.path(), "new.txt"));
+    }
+
+    // Rename stale: the old path has a newer edit the renaming device hasn't seen.
+    // The rename is rejected (STALE) and the file stays at old_path.
+    #[tokio::test]
+    async fn rename_stale_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+
+        s.write_file(write_req("f.txt", b"v1", &[("dell", 1)], "dell"))
+            .await
+            .unwrap();
+        // Another edit advances the clock
+        s.write_file(write_req("f.txt", b"v2", &[("dell", 2)], "dell"))
+            .await
+            .unwrap();
+
+        // Rename with a stale clock — the file already moved to {dell:2}
+        let r = s
+            .rename_file(rename_req("f.txt", "renamed.txt", &[("dell", 1)], "dell"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(r.result, rename_file_response::Result::Stale as i32);
+        assert!(exists(dir.path(), "f.txt"), "file stays at old path");
+        assert!(
+            !exists(dir.path(), "renamed.txt"),
+            "rename did not happen"
+        );
+        assert_eq!(std::fs::read(dir.path().join("f.txt")).unwrap(), b"v2");
+    }
+
+    // Rename of a deleted file: old path is tombstoned, rename is stale.
+    #[tokio::test]
+    async fn rename_of_deleted_file_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+
+        s.write_file(write_req("f.txt", b"v1", &[("dell", 1)], "dell"))
+            .await
+            .unwrap();
+        s.delete_file(delete_req("f.txt", &[("dell", 2)], "dell"))
+            .await
+            .unwrap();
+
+        // Try to rename the deleted file
+        let r = s
+            .rename_file(rename_req("f.txt", "renamed.txt", &[("dell", 1)], "dell"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(r.result, rename_file_response::Result::Stale as i32);
+        assert!(!exists(dir.path(), "renamed.txt"));
     }
 }

@@ -12,7 +12,8 @@ use anyhow::{Context, Result};
 use nexus_proto::fs::v1::FileEntry;
 use nexus_proto::fs::v1::{
     file_service_client::FileServiceClient, DeleteFileRequest, DeleteFileResponse, ListDirRequest,
-    ReadFileRequest, StatRequest, WriteFileRequest, WriteFileResponse,
+    ReadFileRequest, RenameFileRequest, RenameFileResponse, StatRequest, WriteFileRequest,
+    WriteFileResponse,
 };
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
@@ -171,6 +172,31 @@ impl RemoteFs {
         let resp = client
             .delete_file(self.authed(DeleteFileRequest {
                 path: path.to_string(),
+                clock: Some(nexus_proto::fs::v1::VectorClock {
+                    counters: clock.0.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                }),
+                writer_device_id: writer_device_id.to_string(),
+            }))
+            .await?;
+        Ok(resp.into_inner())
+    }
+
+    /// Renames/moves `old_path` to `new_path` on the host, carrying this client's
+    /// vector clock for the file being renamed. The host updates its path-to-clock
+    /// mapping in place (preserving the file's vector clock history — see ADR 0009).
+    /// Returns the host's decision and the authoritative clock for the new path.
+    pub async fn rename_file(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        clock: &nexus_common::VectorClock,
+        writer_device_id: &str,
+    ) -> Result<RenameFileResponse> {
+        let mut client = self.client.clone();
+        let resp = client
+            .rename_file(self.authed(RenameFileRequest {
+                old_path: old_path.to_string(),
+                new_path: new_path.to_string(),
                 clock: Some(nexus_proto::fs::v1::VectorClock {
                     counters: clock.0.iter().map(|(k, v)| (k.clone(), *v)).collect(),
                 }),
