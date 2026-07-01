@@ -94,9 +94,12 @@ versa; or a file was deleted out-of-band via raw filesystem access). In that
 case, the clock entry is orphaned and the TTL sweep will clean it up just like
 a tombstone.
 
-**Key difference from tombstones:** Clock entries for live files are **never**
-removed by GC. The sweep only considers entries whose path has no corresponding
-file on disk. A live file's clock entry is essential for conflict detection.
+**Invariant — clock entries for live files MUST NOT be removed by GC.**
+The sweep MUST verify the file does NOT exist on disk before removing a clock
+entry. If the file still exists at the path, the clock entry MUST be preserved
+regardless of age, TTL, store size, or any other GC criterion. A live file's
+clock entry is essential for conflict detection; removing it would silently
+convert a future concurrent write into a clean overwrite.
 
 ### 4. Size bounds as a safety net
 
@@ -111,10 +114,11 @@ workload cannot OOM the agent:
   under cap.
 - "Oldest" is determined by the `created_at` timestamp for tombstones, and
   by `last_updated_at` (new field) for clock entries.
-- **Safety constraint:** The cap never evicts clock entries for live files — it
-  only evicts orphaned clock entries (no file on disk). If the store is full of
-  live-file entries, the cap is a signal that the operator should increase it,
-  not a trigger to delete conflict-detection data.
+- **Invariant (same as TTL sweep):** The cap MUST NOT evict clock entries for
+  live files — only orphaned entries (no file on disk) are eligible. If the
+  clock store exceeds the cap and ALL entries are for live files (no orphans),
+  the cap is a signal that the operator should increase it, not a trigger to
+  delete conflict-detection data. Log a WARNING in this case.
 
 ## Implementation
 
@@ -151,31 +155,7 @@ get `last_updated_at = 0`.
 This enables the hard-cap eviction to evict the *oldest* orphaned clock entries
 first, rather than arbitrary entries.
 
-### GC task lifecycle
-
-```rust
-// Spawned in host::run() after store initialization
-tokio::spawn(gc_loop(
-    root: PathBuf,
-    clocks: Arc<ClockStore>,
-    tombstones: Arc<TombstoneStore>,
-    write_lock: Arc<tokio::sync::Mutex<()>>,
-    config: GcConfig,
-));
-
-// Every config.interval:
-async fn gc_loop(...) {
-    loop {
-        tokio::time::sleep(config.interval).await;
-        if let Err(e) = gc_sweep(&root, &clocks, &tombstones, &write_lock, &config).await {
-            tracing::warn!("GC sweep failed: {e}");
-        }
-        report_sizes(&clocks, &tombstones);
-    }
-}
-```
-
-### Locking strategy
+### GC task lifecycle — per-entry locking (NOT per-sweep)
 
 The GC task and the write/delete/rename handlers both touch the clock and
 tombstone stores. Coordination is critical.
@@ -189,15 +169,66 @@ conflict with handler removals of different keys.
 The `write_lock` protects the higher-level consistency invariant (clock +
 tombstone + file on disk are in agreement). GC must coordinate with it.
 
-**Strategy — lock per entry, not per sweep:**
-1. GC collects a list of candidate entries (old TTL, no file on disk) without
-   holding `write_lock`.
-2. For each candidate, GC acquires `write_lock`, removes the entry, releases
-   `write_lock`.
-3. Between entries, GC calls `tokio::task::yield_now()` to let other tasks
-   make progress.
-4. If GC cannot acquire `write_lock` within 100 ms for a given entry, it skips
-   that entry and tries again on the next sweep.
+**Invariant — GC MUST acquire write_lock per entry, NOT hold it for the
+entire sweep.** A full sweep of 50,000 entries could take seconds or minutes,
+blocking all write/delete/rename operations. This violates the "GC should
+never block real operations" design goal.
+
+```rust
+// Spawned in host::run() after store initialization
+tokio::spawn(gc_loop(
+    root: PathBuf,
+    clocks: Arc<ClockStore>,
+    tombstones: Arc<TombstoneStore>,
+    write_lock: Arc<tokio::sync::Mutex<()>>,
+    config: GcConfig,
+));
+
+async fn gc_sweep(root: &Path, clocks: &ClockStore, tombstones: &TombstoneStore,
+                  write_lock: &tokio::sync::Mutex<()>, config: &GcConfig) {
+    // Build candidate list WITHOUT holding write_lock.
+    //   tombstone candidate = past TTL AND no file on disk
+    //   clock candidate    = no file on disk AND no tombstone (orphaned)
+    let tombstone_candidates = find_expired_tombstones(root, tombstones, config);
+    let orphaned_clock_candidates = find_orphaned_clocks(root, clocks, tombstones);
+
+    // Per-entry lock-and-remove — NEVER hold write_lock across entries.
+    for candidate in tombstone_candidates.iter().chain(orphaned_clock_candidates.iter()) {
+        // try_lock with 100ms timeout — skip if contested (handler is
+        // probably touching this exact path; TTL margin means tomorrow
+        // is fine).
+        let guard = tokio::time::timeout(
+            Duration::from_millis(100),
+            write_lock.lock(),
+        ).await.ok() else {
+            tracing::debug!("GC skipping contested entry: {candidate}");
+            continue;
+        };
+        match candidate.store {
+            StoreType::Tombstone => tombstones.remove(&candidate.key)?,
+            StoreType::Clock     => clocks.remove(&candidate.key)?,
+        }
+        drop(guard);  // release write_lock IMMEDIATELY after single removal
+        tokio::task::yield_now().await;  // let competing tasks run
+    }
+
+    // Hard-cap enforcement (also per-entry):
+    enforce_store_caps(root, clocks, tombstones, write_lock, config).await?;
+
+    report_sizes(clocks, tombstones);
+}
+
+// gc_loop: sleep, sweep, loop.
+async fn gc_loop(root: PathBuf, clocks: Arc<ClockStore>, tombstones: Arc<TombstoneStore>,
+                 write_lock: Arc<tokio::sync::Mutex<()>>, config: GcConfig) {
+    loop {
+        tokio::time::sleep(config.interval).await;
+        if let Err(e) = gc_sweep(&root, &clocks, &tombstones, &write_lock, &config).await {
+            tracing::warn!("GC sweep failed: {e}");
+        }
+    }
+}
+```
 
 This is safe because:
 - Each entry is independent — there is no cross-entry invariant that the sweep
@@ -207,11 +238,6 @@ This is safe because:
 - Skipping a contested entry (because a write/delete/rename holds the lock)
   is the correct backoff: the handler is probably touching that exact path,
   and we should not interrupt it.
-
-**Why not hold `write_lock` for the entire sweep:** A full sweep of 50,000
-entries could take seconds or minutes, blocking all write/delete/rename
-operations. This violates the "GC should never block real operations" design
-goal.
 
 ### Hard-cap eviction after TTL sweep
 
