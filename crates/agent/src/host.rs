@@ -477,19 +477,21 @@ impl FileService for FileServiceImpl {
                 }));
             }
             let is_conflict = matches!(incoming.compare(&old_tombstone), ClockOrder::Concurrent);
-            let old_dest = self.resolve(&req.old_path)?;
+            // Old path was deleted — can't rename from it. "Resurrect" the file
+            // at the new path (mirrors delete-vs-edit handling in write_file).
             let new_dest = self.resolve_for_write(&req.new_path)?;
-            tokio::fs::rename(&old_dest, &new_dest)
+            tokio::fs::write(&new_dest, &[])
                 .await
-                .map_err(|e| Status::internal(format!("rename failed: {e}")))?;
+                .map_err(|e| Status::internal(format!("create at new path failed: {e}")))?;
             let merged = old_tombstone.merge(&incoming);
             self.tombstones.remove(&old_key)
                 .map_err(|e| Status::internal(format!("clearing tombstone failed: {e}")))?;
+            let _ = self.tombstones.remove(&new_key);
             self.clocks.put(&new_key, merged.clone())
                 .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
             if is_conflict {
                 tracing::warn!(old_path = %req.old_path, new_path = %req.new_path,
-                    "delete-vs-rename conflict — file moved to new path");
+                    "delete-vs-rename conflict — file resurrected at new path");
             }
             return Ok(Response::new(RenameFileResponse {
                 result: if is_conflict {
@@ -525,6 +527,7 @@ impl FileService for FileServiceImpl {
                 let merged = old_stored.merge(&incoming);
                 self.clocks.remove(&old_key)
                     .map_err(|e| Status::internal(format!("removing old clock failed: {e}")))?;
+                let _ = self.tombstones.remove(&new_key);
                 self.clocks.put(&new_key, merged.clone())
                     .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
                 Ok(Response::new(RenameFileResponse {
@@ -551,6 +554,7 @@ impl FileService for FileServiceImpl {
                 let merged = old_stored.merge(&incoming);
                 self.clocks.remove(&old_key)
                     .map_err(|e| Status::internal(format!("removing old clock failed: {e}")))?;
+                let _ = self.tombstones.remove(&new_key);
                 self.clocks.put(&new_key, merged.clone())
                     .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
                 tracing::warn!(

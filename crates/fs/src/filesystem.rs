@@ -39,7 +39,7 @@ use fuser::{
 use lru::LruCache;
 use nexus_common::{ClockStore, VectorClock};
 use nexus_proto::fs::v1::{delete_file_response, rename_file_response, write_file_response};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -70,6 +70,9 @@ struct InodeTable {
     next_ino: u64,
     path_by_ino: LruCache<u64, String>,
     ino_by_path: HashMap<String, u64>,
+    /// Paths known to be directories (populated during `lookup`). Used to reject
+    /// directory renames until subtree remapping is implemented (ADR 0009).
+    dirs: HashSet<String>,
 }
 
 impl InodeTable {
@@ -83,6 +86,7 @@ impl InodeTable {
             next_ino: 2,
             path_by_ino: LruCache::new(cap),
             ino_by_path: HashMap::new(),
+            dirs: HashSet::new(),
         }
     }
 
@@ -112,6 +116,16 @@ impl InodeTable {
     /// Look up an existing path's inode WITHOUT allocating a new one (and
     /// without bumping LRU recency). Used to check for a locally-buffered file
     /// that may not exist on the host yet.
+    /// Track a path as a directory so rename can reject it.
+    fn track_dir(&mut self, path: &str) {
+        self.dirs.insert(path.to_string());
+    }
+
+    /// Returns true if the path is known to be a directory.
+    fn is_dir(&self, path: &str) -> bool {
+        self.dirs.contains(path)
+    }
+
     fn peek_ino(&self, path: &str) -> Option<u64> {
         if path == "/" {
             return Some(ROOT_INO);
@@ -141,8 +155,12 @@ impl InodeTable {
             return None;
         }
         let ino = self.ino_by_path.remove(old_path)?;
+        // If new_path already had an inode, remove it from both maps so we
+        // don't orphan a stale ino→path pointer in path_by_ino.
+        if let Some(dest_ino) = self.ino_by_path.remove(new_path) {
+            self.path_by_ino.pop(&dest_ino);
+        }
         self.ino_by_path.insert(new_path.to_string(), ino);
-        // Update the path for the existing inode in the LRU, or re-add if evicted.
         if let Some(path) = self.path_by_ino.get_mut(&ino) {
             *path = new_path.to_string();
         } else {
@@ -362,7 +380,13 @@ impl Filesystem for NexusFuse {
 
         match result {
             Ok(Some(entry)) => {
-                let ino = self.inodes.lock().unwrap().ino_for_path(&child_path);
+                let ino = {
+                    let mut table = self.inodes.lock().unwrap();
+                    if entry.is_dir {
+                        table.track_dir(&child_path);
+                    }
+                    table.ino_for_path(&child_path)
+                };
                 let attr = Self::entry_to_attr(ino, &entry);
                 reply.entry(&TTL, &attr, 0);
             }
@@ -775,9 +799,16 @@ impl Filesystem for NexusFuse {
         name: &std::ffi::OsStr,
         newparent: u64,
         newname: &std::ffi::OsStr,
-        _flags: u32,
+        flags: u32,
         reply: ReplyEmpty,
     ) {
+        // We only support plain rename (flags == 0). RENAME_NOREPLACE,
+        // RENAME_EXCHANGE, and other non-zero flags are rejected until
+        // we propagate them through the gRPC layer (ADR 0009).
+        if flags != 0 {
+            return reply.error(libc::EINVAL);
+        }
+
         let (old_path, new_path) = {
             let mut table = self.inodes.lock().unwrap();
             let parent_path = match table.path_for_ino(parent) {
@@ -800,6 +831,11 @@ impl Filesystem for NexusFuse {
             } else {
                 format!("{newparent_path}/{newname_str}")
             };
+            // Reject directory renames — we don't remap subtree entries
+            // in the inode table yet (ADR 0009).
+            if table.is_dir(&old) {
+                return reply.error(libc::EISDIR);
+            }
             (old, new)
         };
 
@@ -936,5 +972,20 @@ mod tests {
         assert_eq!(new_ino, Some(ino), "same inode across directories");
         assert!(t.peek_ino("/dir/old.txt").is_none());
         assert_eq!(t.peek_ino("/other/new.txt"), Some(ino));
+    }
+
+    #[test]
+    fn rename_path_overwrite_cleans_up_old_destination() {
+        let mut t = InodeTable::with_capacity(10);
+        let src_ino = t.ino_for_path("/src.txt");
+        let dest_ino = t.ino_for_path("/dest.txt");
+        let result = t.rename_path("/src.txt", "/dest.txt");
+        assert_eq!(result, Some(src_ino));
+        // Old source path is gone
+        assert!(t.peek_ino("/src.txt").is_none(), "old src removed");
+        // Dest maps to the moved inode
+        assert_eq!(t.peek_ino("/dest.txt"), Some(src_ino));
+        // Old destination inode no longer claims /dest.txt
+        assert_ne!(t.path_for_ino(dest_ino).as_deref(), Some("/dest.txt"));
     }
 }

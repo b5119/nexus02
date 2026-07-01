@@ -104,6 +104,12 @@ In `filesystem.rs`:
 
 **Critical:** Do NOT delete+recreate the inode. Update InodeTable's path mapping in place. The inode number must stay the same so open file handles, mmap, etc. remain valid.
 
+**Overwrite semantics:** If `new_path` already maps to an inode in `InodeTable.rename_path`, that destination inode is removed from `path_by_ino`/`ino_by_path` before the source mapping is moved. On the host, any existing tombstone at `new_path` is cleared before the moved clock is persisted, so a rename cannot inherit a stale deletion marker.
+
+**No directory renames (yet):** `Filesystem::rename` rejects directory renames with `EISDIR` because the inode table does not remap cached descendant entries (`/dir/file.txt` would keep the old prefix). Directory rename support requires subtree path rewriting in the inode table — deferred until it's actually needed.
+
+**No rename flags (yet):** Non-zero flags (`RENAME_NOREPLACE`, `RENAME_EXCHANGE`) are rejected with `EINVAL` in the FUSE handler. Propagating these through the gRPC layer and `tokio::fs::rename` is future work.
+
 ### 6. Deferred Scope: Concurrent Rename-vs-Edit
 
 **OUT OF SCOPE for this session:** The case where Device A renames a file while Device B concurrently edits the *old* path.
