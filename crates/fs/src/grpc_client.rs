@@ -161,6 +161,11 @@ impl RemoteFs {
     /// Streaming write for large files (ADR 0010). Chunks data into 64 KB pieces;
     /// the first chunk carries path/clock/device_id metadata, subsequent chunks
     /// carry data only. The host reassembles into a temp file and renames on success.
+    ///
+    /// Uses a channel-based stream so chunks are sent lazily — never more than a
+    /// small buffer of chunks in memory at once, preserving the memory benefit of
+    /// streaming. Also handles zero-byte writes (empty data sends a single metadata
+    /// chunk without data, instead of an empty stream).
     pub async fn write_file_stream(
         &self,
         path: &str,
@@ -169,38 +174,41 @@ impl RemoteFs {
         writer_device_id: &str,
     ) -> Result<WriteFileResponse> {
         const CHUNK_SIZE: usize = 64 * 1024;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<WriteFileChunk>(2);
         let data_len = data.len();
-        let mut items = Vec::new();
-        let mut offset = 0;
-        let mut chunk_idx = 0;
+        let mut path_owned = Some(path.to_string());
+        let mut writer_owned = Some(writer_device_id.to_string());
+        let mut clock_proto = Some(nexus_proto::fs::v1::VectorClock {
+            counters: clock.0.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        });
 
-        while offset < data_len {
-            let end = std::cmp::min(offset + CHUNK_SIZE, data_len);
-            let chunk_data = data[offset..end].to_vec();
+        tokio::spawn(async move {
+            let mut offset = 0usize;
 
-            if chunk_idx == 0 {
-                items.push(WriteFileChunk {
-                    path: path.to_string(),
-                    clock: Some(nexus_proto::fs::v1::VectorClock {
-                        counters: clock.0.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                    }),
-                    writer_device_id: writer_device_id.to_string(),
+            loop {
+                let end = std::cmp::min(offset + CHUNK_SIZE, data_len);
+                let chunk_data = data[offset..end].to_vec();
+
+                let chunk = WriteFileChunk {
+                    path: path_owned.take().unwrap_or_default(),
+                    clock: clock_proto.take(),
+                    writer_device_id: writer_owned.take().unwrap_or_default(),
                     data: chunk_data,
-                });
-            } else {
-                items.push(WriteFileChunk {
-                    path: String::new(),
-                    clock: None,
-                    writer_device_id: String::new(),
-                    data: chunk_data,
-                });
+                };
+
+                if tx.send(chunk).await.is_err() {
+                    break;
+                }
+
+                if end >= data_len {
+                    break;
+                }
+                offset = end;
             }
+        });
 
-            offset = end;
-            chunk_idx += 1;
-        }
-
-        let stream = tokio_stream::iter(items);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let mut req = Request::new(stream);
         req.metadata_mut().insert(AUTH_HEADER, self.token.clone());
 

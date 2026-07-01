@@ -40,6 +40,47 @@ const CHUNK_SIZE: usize = 64 * 1024; // 64KiB — small enough to keep memory fl
                                      // large enough to not drown in RPC overhead
                                      // over a phone's wifi link.
 
+/// A temp file that is cleaned up on drop unless committed. Ensures no
+/// partial writes are left behind if a streaming write handler errors out.
+struct TempFile {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl TempFile {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    fn mark_committed(&mut self) {
+        self.committed = true;
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Sanitize a `writer_device_id` so it is safe to use as part of a filename.
+/// Replaces any character that is not alphanumeric, `-`, or `_` with `_`,
+/// preventing path-separator injection in conflict-file naming.
+fn sanitize_device_id(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
 pub struct FileServiceImpl {
     root: PathBuf,
     /// Per-file vector clocks for LIVE files (path -> clock).
@@ -387,7 +428,7 @@ impl FileService for FileServiceImpl {
         let writer = if init.writer_device_id.is_empty() {
             "unknown".to_string()
         } else {
-            init.writer_device_id.clone()
+            sanitize_device_id(&init.writer_device_id)
         };
         let key = Self::clock_key(&path);
         if key.is_empty() {
@@ -395,15 +436,15 @@ impl FileService for FileServiceImpl {
         }
 
         // Write chunks to a temp file. Using UUID for uniqueness so concurrent
-        // streams to the same path don't collide.
+        // streams to the same path don't collide. TempFile's Drop ensures cleanup
+        // if the handler exits before committing (rename).
         let dest = self.resolve_for_write(&path)?;
         let parent = dest.parent().unwrap_or(&self.root);
         let tmp_name = format!(".nexus-write-{}", uuid::Uuid::new_v4());
-        let tmp_path = parent.join(&tmp_name);
+        let mut tmp = TempFile::new(parent.join(&tmp_name));
 
-        // Write the first chunk's data and stream the rest.
         {
-            let mut f = tokio::fs::File::create(&tmp_path)
+            let mut f = tokio::fs::File::create(tmp.path())
                 .await
                 .map_err(|e| Status::internal(format!("create temp file failed: {e}")))?;
             f.write_all(&init.data)
@@ -427,7 +468,6 @@ impl FileService for FileServiceImpl {
         if !tombstone.0.is_empty() {
             if matches!(incoming.compare(&tombstone), ClockOrder::DominatedBy) {
                 tracing::warn!(%path, "ignoring stale streaming write to a deleted file");
-                let _ = tokio::fs::remove_file(&tmp_path).await;
                 return Ok(Response::new(WriteFileResponse {
                     result: write_file_response::Result::Stale as i32,
                     clock: Some(clock_to_proto(&tombstone)),
@@ -435,9 +475,10 @@ impl FileService for FileServiceImpl {
                 }));
             }
             let is_conflict = matches!(incoming.compare(&tombstone), ClockOrder::Concurrent);
-            tokio::fs::rename(&tmp_path, &dest)
+            tokio::fs::rename(tmp.path(), &dest)
                 .await
                 .map_err(|e| Status::internal(format!("final rename failed: {e}")))?;
+            tmp.mark_committed();
             let merged = tombstone.merge(&incoming);
             self.tombstones
                 .remove(&key)
@@ -463,9 +504,10 @@ impl FileService for FileServiceImpl {
 
         match incoming.compare(&stored) {
             ClockOrder::Dominates | ClockOrder::Equal => {
-                tokio::fs::rename(&tmp_path, &dest)
+                tokio::fs::rename(tmp.path(), &dest)
                     .await
                     .map_err(|e| Status::internal(format!("final rename failed: {e}")))?;
+                tmp.mark_committed();
                 let merged = stored.merge(&incoming);
                 self.clocks
                     .put(&key, merged.clone())
@@ -478,7 +520,6 @@ impl FileService for FileServiceImpl {
             }
             ClockOrder::DominatedBy => {
                 tracing::warn!(%path, "ignoring stale streaming write");
-                let _ = tokio::fs::remove_file(&tmp_path).await;
                 Ok(Response::new(WriteFileResponse {
                     result: write_file_response::Result::Stale as i32,
                     clock: Some(clock_to_proto(&stored)),
@@ -492,9 +533,10 @@ impl FileService for FileServiceImpl {
                     .unwrap_or(0);
                 let conflict_rel = format!("{key}.conflict-{writer}-{ts}");
                 let conflict_dest = self.resolve_for_write(&conflict_rel)?;
-                tokio::fs::rename(&tmp_path, &conflict_dest)
+                tokio::fs::rename(tmp.path(), &conflict_dest)
                     .await
                     .map_err(|e| Status::internal(format!("rename conflict failed: {e}")))?;
+                tmp.mark_committed();
                 self.clocks
                     .put(&conflict_rel, incoming.clone())
                     .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;

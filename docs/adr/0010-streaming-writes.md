@@ -102,9 +102,9 @@ because the path is always known at stream start and never changes mid-stream.
   This ensures a mid-stream failure doesn't leave a partial file at the
   target path.
 - The `CHUNK_SIZE` constant is reused from the read path — no new tuning.
-- Existing tests pass unchanged. New tests verify large files (>4 MB to
-  exercise chunk boundaries beyond tonic's default message limit) and
-  byte-exact comparison.
+- Existing tests pass unchanged. A follow-up adds large-file integration
+  tests (>4 MB to exercise chunk boundaries beyond tonic's default message
+  limit) and byte-exact comparison.
 - ADR 0006's note about "unary/whole-file for now; large-file streaming is
   a future refinement" is resolved.
 
