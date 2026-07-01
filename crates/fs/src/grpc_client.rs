@@ -12,8 +12,8 @@ use anyhow::{Context, Result};
 use nexus_proto::fs::v1::FileEntry;
 use nexus_proto::fs::v1::{
     file_service_client::FileServiceClient, DeleteFileRequest, DeleteFileResponse, ListDirRequest,
-    ReadFileRequest, RenameFileRequest, RenameFileResponse, StatRequest, WriteFileRequest,
-    WriteFileResponse,
+    ReadFileRequest, RenameFileRequest, RenameFileResponse, StatRequest, WriteFileChunk,
+    WriteFileRequest, WriteFileResponse,
 };
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
@@ -134,11 +134,9 @@ impl RemoteFs {
         Ok(buf)
     }
 
-    /// Writes `data` to `path` on the host, carrying this client's vector clock
-    /// (with its own counter already incremented). Returns the host's decision
-    /// (Applied / Stale / Conflict) and the authoritative clock.
-    ///
-    /// Wired into the FUSE `write`/`create`/flush path (ADR 0006).
+    /// Unary write — kept for backward compatibility (the FUSE layer uses
+    /// `write_file_stream` instead).
+    #[allow(dead_code)]
     pub async fn write_file(
         &self,
         path: &str,
@@ -157,6 +155,65 @@ impl RemoteFs {
                 writer_device_id: writer_device_id.to_string(),
             }))
             .await?;
+        Ok(resp.into_inner())
+    }
+
+    /// Streaming write for large files (ADR 0010). Chunks data into 64 KB pieces;
+    /// the first chunk carries path/clock/device_id metadata, subsequent chunks
+    /// carry data only. The host reassembles into a temp file and renames on success.
+    ///
+    /// Uses a channel-based stream so chunks are sent lazily — never more than a
+    /// small buffer of chunks in memory at once, preserving the memory benefit of
+    /// streaming. Also handles zero-byte writes (empty data sends a single metadata
+    /// chunk without data, instead of an empty stream).
+    pub async fn write_file_stream(
+        &self,
+        path: &str,
+        data: Vec<u8>,
+        clock: &nexus_common::VectorClock,
+        writer_device_id: &str,
+    ) -> Result<WriteFileResponse> {
+        const CHUNK_SIZE: usize = 64 * 1024;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<WriteFileChunk>(2);
+        let data_len = data.len();
+        let mut path_owned = Some(path.to_string());
+        let mut writer_owned = Some(writer_device_id.to_string());
+        let mut clock_proto = Some(nexus_proto::fs::v1::VectorClock {
+            counters: clock.0.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        });
+
+        tokio::spawn(async move {
+            let mut offset = 0usize;
+
+            loop {
+                let end = std::cmp::min(offset + CHUNK_SIZE, data_len);
+                let chunk_data = data[offset..end].to_vec();
+
+                let chunk = WriteFileChunk {
+                    path: path_owned.take().unwrap_or_default(),
+                    clock: clock_proto.take(),
+                    writer_device_id: writer_owned.take().unwrap_or_default(),
+                    data: chunk_data,
+                };
+
+                if tx.send(chunk).await.is_err() {
+                    break;
+                }
+
+                if end >= data_len {
+                    break;
+                }
+                offset = end;
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let mut req = Request::new(stream);
+        req.metadata_mut().insert(AUTH_HEADER, self.token.clone());
+
+        let mut client = self.client.clone();
+        let resp = client.write_file_stream(req).await?;
         Ok(resp.into_inner())
     }
 

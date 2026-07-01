@@ -17,8 +17,14 @@ service FileService {
   // Multi-writer write carrying the writer's vector clock. The host compares
   // it against its stored clock and either applies it, ignores a stale write,
   // or (on concurrent edits) keeps both — see ADR 0005. Unary/whole-file for
-  // now; large-file streaming is a future refinement.
+  // backward compatibility; the FUSE layer uses WriteFileStream instead.
   rpc WriteFile (WriteFileRequest) returns (WriteFileResponse);
+
+  // Streaming write for large files (ADR 0010). The client streams 64 KB
+  // chunks; the first chunk carries metadata (path, clock, writer_device_id).
+  // The host reassembles into a temp file and renames on success, keeping the
+  // conflict-detection boundary at stream-end (same as WriteFile).
+  rpc WriteFileStream (stream WriteFileChunk) returns (WriteFileResponse);
 
   // Delete a file, carrying the deleter's vector clock. The host records a
   // tombstone and detects delete-vs-edit conflicts — see ADR 0008.
@@ -103,6 +109,21 @@ message WriteFileResponse {
   // Relative path of the conflict copy. Set only for an edit-vs-edit CONFLICT;
   // empty for a delete-vs-edit CONFLICT (see the Result.CONFLICT note).
   string conflict_path = 3;
+}
+
+// A single chunk in a streaming write (ADR 0010). The first chunk in the
+// stream carries metadata (path, clock, writer_device_id); subsequent chunks
+// set only data. The host uses path non-empty as the "stream init" signal.
+message WriteFileChunk {
+  // Path to write to. Set only on the first chunk of the stream.
+  string path = 1;
+  // The writer's clock for this file AFTER incrementing its own counter.
+  // Set only on the first chunk.
+  VectorClock clock = 2;
+  // Which device is performing this write. Set only on the first chunk.
+  string writer_device_id = 3;
+  // Payload bytes for this chunk (present on every chunk).
+  bytes data = 4;
 }
 
 message DeleteFileRequest {
