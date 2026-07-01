@@ -18,10 +18,9 @@ use nexus_common::{ClockOrder, ClockStore, VectorClock};
 use nexus_proto::fs::v1::{
     delete_file_response,
     file_service_server::{FileService, FileServiceServer},
-    rename_file_response,
-    write_file_response, DeleteFileRequest, DeleteFileResponse, FileEntry, ListDirRequest,
-    ListDirResponse, ReadFileChunk, ReadFileRequest, RenameFileRequest, RenameFileResponse,
-    StatRequest, StatResponse, WriteFileRequest, WriteFileResponse,
+    rename_file_response, write_file_response, DeleteFileRequest, DeleteFileResponse, FileEntry,
+    ListDirRequest, ListDirResponse, ReadFileChunk, ReadFileRequest, RenameFileRequest,
+    RenameFileResponse, StatRequest, StatResponse, WriteFileRequest, WriteFileResponse,
 };
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -484,10 +483,12 @@ impl FileService for FileServiceImpl {
                 .await
                 .map_err(|e| Status::internal(format!("create at new path failed: {e}")))?;
             let merged = old_tombstone.merge(&incoming);
-            self.tombstones.remove(&old_key)
+            self.tombstones
+                .remove(&old_key)
                 .map_err(|e| Status::internal(format!("clearing tombstone failed: {e}")))?;
             let _ = self.tombstones.remove(&new_key);
-            self.clocks.put(&new_key, merged.clone())
+            self.clocks
+                .put(&new_key, merged.clone())
                 .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
             if is_conflict {
                 tracing::warn!(old_path = %req.old_path, new_path = %req.new_path,
@@ -525,10 +526,12 @@ impl FileService for FileServiceImpl {
                     .await
                     .map_err(|e| Status::internal(format!("rename failed: {e}")))?;
                 let merged = old_stored.merge(&incoming);
-                self.clocks.remove(&old_key)
+                self.clocks
+                    .remove(&old_key)
                     .map_err(|e| Status::internal(format!("removing old clock failed: {e}")))?;
                 let _ = self.tombstones.remove(&new_key);
-                self.clocks.put(&new_key, merged.clone())
+                self.clocks
+                    .put(&new_key, merged.clone())
                     .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
                 Ok(Response::new(RenameFileResponse {
                     result: rename_file_response::Result::Renamed as i32,
@@ -552,10 +555,12 @@ impl FileService for FileServiceImpl {
                     .await
                     .map_err(|e| Status::internal(format!("rename failed: {e}")))?;
                 let merged = old_stored.merge(&incoming);
-                self.clocks.remove(&old_key)
+                self.clocks
+                    .remove(&old_key)
                     .map_err(|e| Status::internal(format!("removing old clock failed: {e}")))?;
                 let _ = self.tombstones.remove(&new_key);
-                self.clocks.put(&new_key, merged.clone())
+                self.clocks
+                    .put(&new_key, merged.clone())
                     .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
                 tracing::warn!(
                     old_path = %req.old_path,
@@ -1117,7 +1122,12 @@ mod tests {
             .unwrap();
 
         let r = s
-            .rename_file(rename_req("old.txt", "subdir/moved.txt", &[("dell", 2)], "dell"))
+            .rename_file(rename_req(
+                "old.txt",
+                "subdir/moved.txt",
+                &[("dell", 2)],
+                "dell",
+            ))
             .await
             .unwrap()
             .into_inner();
@@ -1140,7 +1150,12 @@ mod tests {
         let s = svc(dir.path());
 
         let r = s
-            .rename_file(rename_req("nonexistent.txt", "new.txt", &[("dell", 1)], "dell"))
+            .rename_file(rename_req(
+                "nonexistent.txt",
+                "new.txt",
+                &[("dell", 1)],
+                "dell",
+            ))
             .await
             .unwrap()
             .into_inner();
@@ -1173,10 +1188,7 @@ mod tests {
 
         assert_eq!(r.result, rename_file_response::Result::Stale as i32);
         assert!(exists(dir.path(), "f.txt"), "file stays at old path");
-        assert!(
-            !exists(dir.path(), "renamed.txt"),
-            "rename did not happen"
-        );
+        assert!(!exists(dir.path(), "renamed.txt"), "rename did not happen");
         assert_eq!(std::fs::read(dir.path().join("f.txt")).unwrap(), b"v2");
     }
 

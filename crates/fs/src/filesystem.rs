@@ -842,9 +842,12 @@ impl Filesystem for NexusFuse {
         let mut clock = self.client_clocks.get(&old_path);
         clock.increment(&self.device_id);
 
-        let resp = self
-            .runtime
-            .block_on(self.client.rename_file(&old_path, &new_path, &clock, &self.device_id));
+        let resp = self.runtime.block_on(self.client.rename_file(
+            &old_path,
+            &new_path,
+            &clock,
+            &self.device_id,
+        ));
 
         match resp {
             Ok(r) => {
