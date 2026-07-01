@@ -23,6 +23,12 @@ service FileService {
   // Delete a file, carrying the deleter's vector clock. The host records a
   // tombstone and detects delete-vs-edit conflicts — see ADR 0008.
   rpc DeleteFile (DeleteFileRequest) returns (DeleteFileResponse);
+
+  // Rename/move a file, carrying the writer's vector clock for the OLD path.
+  // The host moves the file on disk and transfers the clock entry to the new
+  // path. Preserves vector clock history (inode identity unchanged) — see ADR 0009.
+  // Detects rename-vs-edit/delete conflicts.
+  rpc RenameFile (RenameFileRequest) returns (RenameFileResponse);
 }
 
 message ListDirRequest {
@@ -123,4 +129,35 @@ message DeleteFileResponse {
   // The authoritative clock for `path` after this operation (the tombstone
   // clock on DELETED, the live clock otherwise).
   VectorClock clock = 2;
+}
+
+message RenameFileRequest {
+  string old_path = 1;
+  string new_path = 2;
+  // The writer's clock for the OLD path AFTER incrementing its own counter.
+  VectorClock clock = 3;
+  // Which device is performing this rename.
+  string writer_device_id = 4;
+}
+
+message RenameFileResponse {
+  enum Result {
+    // Rename applied: file moved, clock transferred to new_path.
+    RENAMED = 0;
+    // Incoming clock was stale (host already has a dominating version at
+    // old_path, e.g. another device moved/deleted it first): not applied.
+    STALE = 1;
+    // Concurrent conflict (rename-vs-edit or rename-vs-delete). The rename
+    // SUCCEEDS (file at new_path), AND the concurrent edit at old_path is
+    // preserved as a conflict copy (old_path.conflict-<device>-<ts>). See ADR 0009.
+    CONFLICT = 2;
+    // Old path not found (never existed or already moved/deleted).
+    NOT_FOUND = 3;
+  }
+  Result result = 1;
+  // The authoritative clock for NEW_PATH after this operation.
+  VectorClock clock = 2;
+  // Relative path of the conflict copy. Set only for CONFLICT (rename-vs-edit);
+  // empty for rename-vs-delete CONFLICT (mirrors DeleteFile ADR 0008).
+  string conflict_path = 3;
 }

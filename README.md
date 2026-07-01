@@ -10,7 +10,8 @@ for why that idea doesn't hold up, and what Nexus does instead.
 ## A note on AI involvement
 
 This project was **architected and directed by the maintainer** and **implemented
-with Claude / Claude Code**. The split, concretely:
+with AI coding assistants (tools have varied across the project's lifetime) under
+human direction**. The split, concretely:
 
 - **Human-directed:** the scoping, the feature sequencing (each milestone landed
   as a separate, reviewed iteration), the test strategy, the on-device hardware
@@ -144,7 +145,8 @@ cross-compiled binary you can push via `adb` for testing.
       while a blind overwrite of a changed file still conflicts. Remaining gaps
       named in the ADRs. Deletes are supported with **delete-vs-edit conflict
       detection** (tombstones — [docs/adr/0008](docs/adr/0008-delete-vs-edit-conflicts.md));
-      rename and directory-level conflicts are still open.
+      rename is done ([docs/adr/0009](docs/adr/0009-rename-move-support.md));
+      directory-level conflicts are still open.
 - [ ] Full pairing / control plane (device identity, revocation, key rotation)
       — ADR 0004 is only the shared-secret step, not this
 - [ ] Layer 1 (remote control / streaming) — not started
