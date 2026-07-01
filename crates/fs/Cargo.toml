@@ -21,6 +21,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # Bounded inode<->path table (LRU eviction) so a long-running mount over a
 # large remote tree can't leak memory indefinitely.
 lru = "0.18"
+tokio-stream = "0.1"
 
 # fuser only builds on platforms that actually have a FUSE userspace
 # library to link against. This crate should never be compiled for

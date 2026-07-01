@@ -286,7 +286,7 @@ impl NexusFuse {
 
         let resp = self
             .runtime
-            .block_on(self.client.write_file(path, data, &clock, &self.device_id))
+            .block_on(self.client.write_file_stream(path, data, &clock, &self.device_id))
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         // Adopt the host's authoritative clock so the next write builds on it.
