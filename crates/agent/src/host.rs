@@ -77,7 +77,13 @@ impl Drop for TempFile {
 /// preventing path-separator injection in conflict-file naming.
 fn sanitize_device_id(raw: &str) -> String {
     raw.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
