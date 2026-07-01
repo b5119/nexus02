@@ -10,3 +10,8 @@ Cargo.lock.bak
 .ndk/
 *.apk
 *.aab
+
+# AI assistant working memory — prompts, session context, notes
+# This is the assistant's scratchpad, not part of the public repo.
+/PROMPTS.md
+.claude/
