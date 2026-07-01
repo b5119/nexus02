@@ -7,23 +7,6 @@ This is **not** a generic "virtualize any device" tool — see
 [docs/adr/0001-android-fuse-limitation.md](docs/adr/0001-android-fuse-limitation.md)
 for why that idea doesn't hold up, and what Nexus does instead.
 
-## A note on AI involvement
-
-This project was **architected and directed by the maintainer** and **implemented
-with AI coding assistants (tools have varied across the project's lifetime) under
-human direction**. The split, concretely:
-
-- **Human-directed:** the scoping, the feature sequencing (each milestone landed
-  as a separate, reviewed iteration), the test strategy, the on-device hardware
-  verification, and accepting or redirecting design proposals.
-- **AI-generated under that direction:** the Rust implementation, and a good
-  share of the design proposals themselves (reviewed before they landed).
-
-Commits are authored under the maintainer's account; this note — together with
-the commit history and the ADRs in [`docs/adr/`](docs/adr/) — is the canonical
-record of how the work was split. It's stated up front because it's relevant to
-how you should read the code and the claims here.
-
 ### Code review
 
 Every PR is reviewed by two automated reviewers — [CodeRabbit](https://coderabbit.ai)
