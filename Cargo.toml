@@ -5,6 +5,7 @@ members = [
     "crates/proto",
     "crates/agent",
     "crates/fs",
+    "crates/migrate",
 ]
 
 # Shared dependency versions across the workspace.
