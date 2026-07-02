@@ -405,10 +405,18 @@ mod tests {
 
     #[test]
     fn t3_import_app_merge_resolves_conflict() {
-        let mut sdk = make_sdk();
-        // seed local state via export first
-        let mut sdk2 = make_sdk();
-        let _ = sdk2.export_snapshot().unwrap();
+        // Seed local with "k2" — value must be longer than remote's "short"
+        // so TestApp::merge (picks longer value) returns the local one.
+        let store = Arc::new(std::sync::Mutex::new(HashMap::from([(
+            "k2".into(),
+            StateEntry {
+                value: b"local-value-here".to_vec(),
+                conflict_policy: ConflictPolicy::AppMerge,
+                schema_version: 1,
+            },
+        )])));
+        let mut sdk = make_sdk_with(store);
+        sdk.export_snapshot().unwrap();
 
         let remote = AppSnapshot {
             device_id: "remote".into(),
@@ -424,6 +432,13 @@ mod tests {
         };
         let conflicts = sdk.import_snapshot(remote).unwrap();
         assert!(conflicts.conflicts.is_empty());
+
+        // Verify merged value was written to local state.
+        // TestApp::merge picks the longer value, and
+        // b"local-value-here" (15 bytes) > b"short" (5 bytes).
+        let exported = sdk.export_snapshot().unwrap();
+        let entry = exported.keys.get("k2").unwrap();
+        assert_eq!(entry.value, b"local-value-here");
     }
 
     #[test]
