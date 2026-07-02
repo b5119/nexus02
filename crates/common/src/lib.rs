@@ -1,17 +1,10 @@
-//! Shared types used by every nexus crate: agent, fs, and (later)
-//! stream and migrate-sdk. Keeping these here avoids circular deps
-//! and means the wire format (DeviceId, FileEntry, etc.) only has
-//! one definition that proto/agent/fs all agree on.
-
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-/// Uniquely identifies a device in the mesh (Dell, phone, tablet, etc).
-/// Generated once on first agent run and persisted to disk —
-/// see agent::config for where this gets stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DeviceId(pub Uuid);
 
@@ -33,10 +26,6 @@ impl std::fmt::Display for DeviceId {
     }
 }
 
-/// What kind of device this is — affects which capabilities the agent
-/// advertises. A phone, for instance, will (for now) only ever act as
-/// a host, never mount a remote filesystem itself, per the Android
-/// FUSE limitation discussed in the architecture doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceKind {
     Linux,
@@ -46,9 +35,6 @@ pub enum DeviceKind {
 }
 
 impl DeviceKind {
-    /// Whether this device kind can mount a remote filesystem via FUSE/WinFsp.
-    /// Android returns false — it can only be browsed via the in-app UI,
-    /// never mounted as a real filesystem for other apps to see.
     pub fn supports_fuse_client(&self) -> bool {
         matches!(
             self,
@@ -57,9 +43,6 @@ impl DeviceKind {
     }
 }
 
-/// A single file or directory entry, as returned by the host agent's
-/// ListDir RPC. Deliberately minimal for milestone 1 — no permissions,
-/// no extended attributes yet, just enough for a read-only mount to work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     pub name: String,
@@ -89,25 +72,14 @@ pub type Result<T> = std::result::Result<T, NexusError>;
 // Vector clocks (multi-writer conflict detection — see docs/adr/0005)
 // ---------------------------------------------------------------------------
 
-/// A version vector for a single file: device id (as string) -> logical counter.
-/// Stored as per-agent metadata, never inside file content. A device increments
-/// *its own* counter on each local write.
-///
-/// BTreeMap (not HashMap) for deterministic serialization/iteration — makes the
-/// JSON store stable and tests reproducible.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VectorClock(pub BTreeMap<String, u64>);
 
-/// Result of comparing two vector clocks. `Concurrent` is the only one that
-/// represents a real conflict (independent edits that neither supersedes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockOrder {
     Equal,
-    /// `self` strictly dominates `other` (self is the newer, unambiguous version).
     Dominates,
-    /// `other` strictly dominates `self` (self is stale).
     DominatedBy,
-    /// Neither dominates — a genuine conflict.
     Concurrent,
 }
 
@@ -120,20 +92,14 @@ impl VectorClock {
         self.0.get(device).copied().unwrap_or(0)
     }
 
-    /// Increment this device's own counter (call on a local write).
     pub fn increment(&mut self, device: &str) {
         *self.0.entry(device.to_string()).or_insert(0) += 1;
     }
 
-    /// Compare against another clock by the standard version-vector partial order:
-    /// dominance requires every counter >= the other's (missing == 0) with at
-    /// least one strictly greater; if each has a counter the other lacks/trails,
-    /// they're concurrent.
     pub fn compare(&self, other: &VectorClock) -> ClockOrder {
         let mut self_greater = false;
         let mut other_greater = false;
 
-        // Walk the union of device ids present in either clock.
         for device in self.0.keys().chain(other.0.keys()) {
             let a = self.get(device);
             let b = other.get(device);
@@ -152,8 +118,6 @@ impl VectorClock {
         }
     }
 
-    /// Pairwise max of the two clocks (the least upper bound). Used when a write
-    /// is applied so the stored clock subsumes everything seen so far.
     pub fn merge(&self, other: &VectorClock) -> VectorClock {
         let mut out = self.0.clone();
         for (device, &counter) in &other.0 {
@@ -164,27 +128,72 @@ impl VectorClock {
     }
 }
 
-/// A tiny, thread-safe, per-agent metadata store mapping a (relative) file path
-/// to its vector clock. Persisted as a single atomic JSON file.
-///
-/// Deliberately NOT an embedded DB (sled/redb): for milestone-scale metadata an
-/// atomic JSON map is lighter to integrate, has no heavy/Cross-compile-fragile
-/// dependencies, and keeps the Android build clean — see ADR 0005. The whole map
-/// is rewritten on each put (temp file + rename for atomicity); fine at this
-/// scale, revisit if the clock set ever gets large.
+// ---------------------------------------------------------------------------
+// Clock and tombstone entries with timestamps (GC — see ADR 0011)
+// ---------------------------------------------------------------------------
+
+pub fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TombstoneEntry {
+    pub clock: VectorClock,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClockEntry {
+    pub clock: VectorClock,
+    #[serde(default)]
+    pub last_updated_at: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TombstoneFileValue {
+    Old(VectorClock),
+    New(TombstoneEntry),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ClockFileValue {
+    Old(VectorClock),
+    New(ClockEntry),
+}
+
+// ---------------------------------------------------------------------------
+// ClockStore — per-agent clock metadata
+// ---------------------------------------------------------------------------
+
 pub struct ClockStore {
     path: PathBuf,
-    inner: Mutex<BTreeMap<String, VectorClock>>,
+    inner: Mutex<BTreeMap<String, ClockEntry>>,
 }
 
 impl ClockStore {
-    /// Open (or initialize) the store at `path`. Missing file => empty store.
     pub fn open(path: PathBuf) -> std::io::Result<Self> {
         let inner = if path.exists() {
             let raw = std::fs::read_to_string(&path)?;
-            let map: BTreeMap<String, VectorClock> = serde_json::from_str(&raw)
+            let map: BTreeMap<String, ClockFileValue> = serde_json::from_str(&raw)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            map
+            map.into_iter()
+                .map(|(k, v)| match v {
+                    ClockFileValue::Old(clock) => (
+                        k,
+                        ClockEntry {
+                            clock,
+                            last_updated_at: 0,
+                        },
+                    ),
+                    ClockFileValue::New(entry) => (k, entry),
+                })
+                .collect()
         } else {
             BTreeMap::new()
         };
@@ -194,37 +203,141 @@ impl ClockStore {
         })
     }
 
-    /// The clock for `key`, or an empty clock if the path is unknown.
     pub fn get(&self, key: &str) -> VectorClock {
         let map = self.inner.lock().unwrap();
-        map.get(key).cloned().unwrap_or_default()
+        map.get(key).map(|e| e.clock.clone()).unwrap_or_default()
     }
 
-    /// Store `clock` for `key` and persist the whole map atomically.
     pub fn put(&self, key: &str, clock: VectorClock) -> std::io::Result<()> {
         let mut map = self.inner.lock().unwrap();
-        map.insert(key.to_string(), clock);
-        persist(&self.path, &map)
+        if let Some(entry) = map.get_mut(key) {
+            entry.clock = clock;
+            entry.last_updated_at = now_unix();
+        } else {
+            map.insert(
+                key.to_string(),
+                ClockEntry {
+                    clock,
+                    last_updated_at: now_unix(),
+                },
+            );
+        }
+        persist(&self.path, &*map)
     }
 
-    /// Remove `key` (if present) and persist. Used to move a path between the
-    /// live-clock store and the tombstone store (ADR 0008).
     pub fn remove(&self, key: &str) -> std::io::Result<()> {
         let mut map = self.inner.lock().unwrap();
         if map.remove(key).is_some() {
-            persist(&self.path, &map)?;
+            persist(&self.path, &*map)?;
         }
         Ok(())
     }
+
+    pub fn entries(&self) -> Vec<(String, ClockEntry)> {
+        let map = self.inner.lock().unwrap();
+        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        let map = self.inner.lock().unwrap();
+        map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
-fn persist(path: &std::path::Path, map: &BTreeMap<String, VectorClock>) -> std::io::Result<()> {
+// ---------------------------------------------------------------------------
+// TombstoneStore — tracks deleted paths for conflict detection + GC
+// ---------------------------------------------------------------------------
+
+pub struct TombstoneStore {
+    path: PathBuf,
+    inner: Mutex<BTreeMap<String, TombstoneEntry>>,
+}
+
+impl TombstoneStore {
+    pub fn open(path: PathBuf) -> std::io::Result<Self> {
+        let inner = if path.exists() {
+            let raw = std::fs::read_to_string(&path)?;
+            let map: BTreeMap<String, TombstoneFileValue> = serde_json::from_str(&raw)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            map.into_iter()
+                .map(|(k, v)| match v {
+                    TombstoneFileValue::Old(clock) => (
+                        k,
+                        TombstoneEntry {
+                            clock,
+                            created_at: 0,
+                        },
+                    ),
+                    TombstoneFileValue::New(entry) => (k, entry),
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+        Ok(Self {
+            path,
+            inner: Mutex::new(inner),
+        })
+    }
+
+    pub fn get(&self, key: &str) -> VectorClock {
+        let map = self.inner.lock().unwrap();
+        map.get(key).map(|e| e.clock.clone()).unwrap_or_default()
+    }
+
+    pub fn put(&self, key: &str, clock: VectorClock) -> std::io::Result<()> {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(entry) = map.get_mut(key) {
+            entry.clock = clock;
+        } else {
+            map.insert(
+                key.to_string(),
+                TombstoneEntry {
+                    clock,
+                    created_at: now_unix(),
+                },
+            );
+        }
+        persist(&self.path, &*map)
+    }
+
+    pub fn remove(&self, key: &str) -> std::io::Result<()> {
+        let mut map = self.inner.lock().unwrap();
+        if map.remove(key).is_some() {
+            persist(&self.path, &*map)?;
+        }
+        Ok(())
+    }
+
+    pub fn entries(&self) -> Vec<(String, TombstoneEntry)> {
+        let map = self.inner.lock().unwrap();
+        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        let map = self.inner.lock().unwrap();
+        map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistence helper — atomic write via temp file + rename
+// ---------------------------------------------------------------------------
+
+fn persist<T: Serialize>(path: &std::path::Path, map: &BTreeMap<String, T>) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(map)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    // temp + rename so a crash mid-write can't truncate the store
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, path)?;
@@ -253,17 +366,14 @@ mod clock_tests {
 
     #[test]
     fn dominance() {
-        // {a:1,b:1} dominates {a:1}
         assert_eq!(
             clock(&[("a", 1), ("b", 1)]).compare(&clock(&[("a", 1)])),
             ClockOrder::Dominates
         );
-        // and the reverse is DominatedBy
         assert_eq!(
             clock(&[("a", 1)]).compare(&clock(&[("a", 1), ("b", 1)])),
             ClockOrder::DominatedBy
         );
-        // a non-empty clock dominates the empty one (new file case)
         assert_eq!(
             clock(&[("a", 1)]).compare(&VectorClock::new()),
             ClockOrder::Dominates
@@ -272,13 +382,10 @@ mod clock_tests {
 
     #[test]
     fn concurrent_is_a_conflict() {
-        // Dell bumped its own counter while phone independently bumped its own:
-        // {dell:2} vs {dell:1,phone:1} — neither dominates.
         assert_eq!(
             clock(&[("dell", 2)]).compare(&clock(&[("dell", 1), ("phone", 1)])),
             ClockOrder::Concurrent
         );
-        // disjoint clocks are also concurrent
         assert_eq!(
             clock(&[("a", 1)]).compare(&clock(&[("b", 1)])),
             ClockOrder::Concurrent
@@ -309,10 +416,46 @@ mod clock_tests {
             assert_eq!(store.get("missing"), VectorClock::new());
             store.put("dir/f.txt", clock(&[("dell", 3)])).unwrap();
         }
-        // reopen: state survived
         let store = ClockStore::open(file).unwrap();
         assert_eq!(store.get("dir/f.txt"), clock(&[("dell", 3)]));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tombstone_store_roundtrips_and_persists() {
+        let dir = std::env::temp_dir().join(format!("nexus-tombstone-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("tombstones.json");
+
+        {
+            let store = TombstoneStore::open(file.clone()).unwrap();
+            assert_eq!(store.get("missing"), VectorClock::new());
+            store.put("del.txt", clock(&[("dell", 2)])).unwrap();
+        }
+        let store = TombstoneStore::open(file).unwrap();
+        assert_eq!(store.get("del.txt"), clock(&[("dell", 2)]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tombstone_entry_gets_created_at() {
+        let dir = std::env::temp_dir().join(format!(
+            "nexus-tombstone-created-at-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("tombstones.json");
+
+        let store = TombstoneStore::open(file).unwrap();
+        store.put("f.txt", clock(&[("a", 1)])).unwrap();
+        let entries = store.entries();
+        let (_, entry) = entries.iter().find(|(k, _)| k == "f.txt").unwrap();
+        assert!(
+            entry.created_at > 0,
+            "new tombstone should have created_at set"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

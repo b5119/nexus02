@@ -36,6 +36,18 @@ struct Args {
     /// Port to listen on for incoming gRPC connections from client agents.
     #[arg(long, default_value_t = 50051)]
     port: u16,
+
+    /// GC sweep interval in hours (ADR 0011).
+    #[arg(long, default_value_t = 6)]
+    gc_interval_hours: u64,
+
+    /// Tombstone TTL in hours (ADR 0011).
+    #[arg(long, default_value_t = 24)]
+    tombstone_ttl_hours: u64,
+
+    /// Hard cap per store (number of entries) before GC eviction.
+    #[arg(long, default_value_t = 50_000)]
+    max_store_entries: usize,
 }
 
 fn init_logging() {
@@ -75,5 +87,13 @@ async fn main() -> Result<()> {
          $HOME/.config/nexus/); the client needs both to connect"
     );
 
-    host::run(args.serve_dir, args.port, cfg.auth_token).await
+    host::run(
+        args.serve_dir,
+        args.port,
+        cfg.auth_token,
+        args.gc_interval_hours,
+        args.tombstone_ttl_hours,
+        args.max_store_entries,
+    )
+    .await
 }

@@ -14,7 +14,7 @@
 #![allow(clippy::result_large_err)]
 
 use anyhow::Result;
-use nexus_common::{ClockOrder, ClockStore, VectorClock};
+use nexus_common::{ClockOrder, ClockStore, TombstoneStore, VectorClock};
 use nexus_proto::fs::v1::{
     delete_file_response,
     file_service_server::{FileService, FileServiceServer},
@@ -95,7 +95,7 @@ pub struct FileServiceImpl {
     /// lives in exactly one of `clocks` (live) or `tombstones` (deleted); this
     /// is what lets a later concurrent edit be detected instead of silently
     /// resurrecting the file. See ADR 0008.
-    tombstones: Arc<ClockStore>,
+    tombstones: Arc<TombstoneStore>,
     /// Serializes the read-compare-apply critical section of WriteFile/DeleteFile
     /// so two concurrent ops on the same path can't interleave and corrupt the
     /// conflict decision. Coarse (one mutating op at a time, any path) but
@@ -799,33 +799,193 @@ fn token_matches(presented: &[u8], expected: &[u8]) -> bool {
     diff == 0
 }
 
-pub async fn run(serve_dir: String, port: u16, auth_token: String) -> Result<()> {
+// ---------------------------------------------------------------------------
+// Garbage collection — periodic sweep (ADR 0011)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct GcConfig {
+    pub interval: std::time::Duration,
+    pub tombstone_ttl: std::time::Duration,
+    pub max_entries: usize,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Per-entry lock-and-remove helper: tries write_lock with 100ms timeout,
+/// then does the actual removal. Returns true if the entry was removed.
+async fn gc_remove_entry<F>(write_lock: &tokio::sync::Mutex<()>, key: &str, do_remove: F) -> bool
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    let guard =
+        tokio::time::timeout(std::time::Duration::from_millis(100), write_lock.lock()).await;
+
+    match guard {
+        Ok(guard) => {
+            let result = do_remove();
+            drop(guard);
+            tokio::task::yield_now().await;
+            result.is_ok()
+        }
+        Err(_) => {
+            tracing::debug!(%key, "GC skipping contested entry");
+            false
+        }
+    }
+}
+
+/// Run one GC sweep cycle: TTL pass then cap enforcement.
+/// `now` is a unix timestamp in seconds (injected for testability).
+async fn gc_sweep(
+    root: &Path,
+    clocks: &ClockStore,
+    tombstones: &TombstoneStore,
+    write_lock: &tokio::sync::Mutex<()>,
+    config: &GcConfig,
+    now: u64,
+) -> anyhow::Result<()> {
+    let ttl_secs = config.tombstone_ttl.as_secs();
+
+    // Phase 1: TTL-based tombstone eviction
+    let mut tombstone_removed = 0u64;
+    for (key, entry) in tombstones.entries() {
+        if entry.created_at > 0 && now.saturating_sub(entry.created_at) >= ttl_secs {
+            let file_path = root.join(&key);
+            // TOCTOU: file existence is checked outside write_lock, so a
+            // concurrent write could recreate the file between this check
+            // and the removal. Worst case: we remove a valid entry one sweep
+            // early — acceptable per ADR 0011 (conservative default).
+            if !file_path.exists() {
+                let removed = gc_remove_entry(write_lock, &key, || tombstones.remove(&key)).await;
+                if removed {
+                    tombstone_removed += 1;
+                }
+            }
+        }
+    }
+
+    // Phase 2: Orphaned clock entry removal (no file on disk, no tombstone)
+    let mut orphaned_removed = 0u64;
+    for (key, _) in clocks.entries() {
+        let file_path = root.join(&key);
+        if !file_path.exists() && tombstones.get(&key).0.is_empty() {
+            let removed = gc_remove_entry(write_lock, &key, || clocks.remove(&key)).await;
+            if removed {
+                orphaned_removed += 1;
+            }
+        }
+    }
+
+    // Phase 3: Hard cap enforcement (after TTL pass)
+    let clock_count = clocks.len();
+    let tombstone_count = tombstones.len();
+
+    if tombstone_count > config.max_entries {
+        let mut entries = tombstones.entries();
+        entries.sort_by_key(|(_, e)| e.created_at);
+        let excess = tombstone_count - config.max_entries;
+        for (key, _) in entries.iter().take(excess) {
+            gc_remove_entry(write_lock, key, || tombstones.remove(key)).await;
+        }
+    }
+
+    if clock_count > config.max_entries {
+        let mut entries: Vec<_> = clocks.entries();
+        entries.retain(|(key, _)| !root.join(key).exists() && tombstones.get(key).0.is_empty());
+
+        if entries.is_empty() {
+            tracing::warn!(
+                clock_count = clock_count,
+                max_entries = config.max_entries,
+                "clock store exceeds hard cap but all entries are for live files — increase --max-store-entries"
+            );
+        } else {
+            entries.sort_by_key(|(_, e)| e.last_updated_at);
+            let target_remove = clock_count.saturating_sub(config.max_entries);
+            for (key, _) in entries.iter().take(target_remove) {
+                gc_remove_entry(write_lock, key, || clocks.remove(key)).await;
+            }
+        }
+    }
+
+    tracing::info!(
+        tombstone_removed = tombstone_removed,
+        orphaned_clock_removed = orphaned_removed,
+        clock_count = clocks.len(),
+        tombstone_count = tombstones.len(),
+        "GC sweep complete"
+    );
+
+    Ok(())
+}
+
+async fn gc_loop(
+    root: PathBuf,
+    clocks: Arc<ClockStore>,
+    tombstones: Arc<TombstoneStore>,
+    write_lock: Arc<tokio::sync::Mutex<()>>,
+    config: GcConfig,
+) {
+    loop {
+        tokio::time::sleep(config.interval).await;
+        let now = unix_now();
+        if let Err(e) = gc_sweep(&root, &clocks, &tombstones, &write_lock, &config, now).await {
+            tracing::warn!("GC sweep failed: {e}");
+        }
+    }
+}
+
+pub async fn run(
+    serve_dir: String,
+    port: u16,
+    auth_token: String,
+    gc_interval_hours: u64,
+    tombstone_ttl_hours: u64,
+    max_store_entries: usize,
+) -> Result<()> {
     let root = PathBuf::from(&serve_dir)
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(&serve_dir));
 
     std::fs::create_dir_all(&root)?;
 
-    // Per-file vector clocks (live + tombstones) live next to the agent's state.
     let cfg_dir = crate::config::config_dir()?;
     let clocks = Arc::new(ClockStore::open(cfg_dir.join("clocks.json"))?);
-    let tombstones = Arc::new(ClockStore::open(cfg_dir.join("tombstones.json"))?);
+    let tombstones = Arc::new(TombstoneStore::open(cfg_dir.join("tombstones.json"))?);
+    let write_lock = Arc::new(tokio::sync::Mutex::new(()));
+
+    // Spawn the GC loop before starting the server.
+    let gc_config = GcConfig {
+        interval: std::time::Duration::from_secs(gc_interval_hours * 3600),
+        tombstone_ttl: std::time::Duration::from_secs(tombstone_ttl_hours * 3600),
+        max_entries: max_store_entries,
+    };
+    tokio::spawn(gc_loop(
+        root.clone(),
+        clocks.clone(),
+        tombstones.clone(),
+        write_lock.clone(),
+        gc_config,
+    ));
 
     let addr = format!("0.0.0.0:{port}").parse()?;
     let service = FileServiceImpl {
         root,
         clocks,
         tombstones,
-        write_lock: Arc::new(tokio::sync::Mutex::new(())),
+        write_lock,
     };
 
     // Load (or generate on first run) the self-signed TLS identity.
     let tls = crate::config::load_or_create_tls_identity()?;
     let identity = Identity::from_pem(&tls.cert_pem, &tls.key_pem);
 
-    // Auth interceptor: runs before any FileService method dispatches, so an
-    // unauthenticated request is rejected before it can reach resolve() or
-    // touch the filesystem. The expected token is moved into the closure.
     let expected = auth_token;
     let interceptor = move |req: Request<()>| -> Result<Request<()>, Status> {
         match req.metadata().get(AUTH_HEADER) {
@@ -849,6 +1009,13 @@ pub async fn run(serve_dir: String, port: u16, auth_token: String) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use nexus_common::TombstoneEntry;
+
+    fn clock(pairs: &[(&str, u64)]) -> VectorClock {
+        VectorClock(pairs.iter().map(|(d, c)| (d.to_string(), *c)).collect())
+    }
 
     fn temp_store() -> std::sync::Arc<ClockStore> {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -863,11 +1030,24 @@ mod tests {
         std::sync::Arc::new(ClockStore::open(path).unwrap())
     }
 
+    fn temp_tombstone_store() -> std::sync::Arc<TombstoneStore> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "nexus-test-tombstones-{}-{}.json",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::sync::Arc::new(TombstoneStore::open(path).unwrap())
+    }
+
     fn svc(root: &std::path::Path) -> FileServiceImpl {
         FileServiceImpl {
             root: root.canonicalize().unwrap(),
             clocks: temp_store(),
-            tombstones: temp_store(),
+            tombstones: temp_tombstone_store(),
             write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -1408,5 +1588,201 @@ mod tests {
 
         assert_eq!(r.result, rename_file_response::Result::Stale as i32);
         assert!(!exists(dir.path(), "renamed.txt"));
+    }
+
+    // -----------------------------------------------------------------------
+    // GC tests T1–T5 (ADR 0011)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn t1_ttl_evicts_old_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let _tombstones = temp_tombstone_store();
+        let clocks = temp_store();
+        let write_lock = Arc::new(tokio::sync::Mutex::new(()));
+
+        // Create tombstones with non-empty clocks so we can distinguish
+        // "not found" from "found with empty clock".
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "old.txt".to_string(),
+            TombstoneEntry {
+                clock: clock(&[("dell", 1)]),
+                created_at: 1,
+            },
+        );
+        raw.insert(
+            "old2.txt".to_string(),
+            TombstoneEntry {
+                clock: clock(&[("dell", 1)]),
+                created_at: 0,
+            },
+        );
+        let store_dir = tempfile::tempdir().unwrap();
+        let store_path = store_dir.path().join("tombstones.json");
+        let json = serde_json::to_string_pretty(&raw).unwrap();
+        std::fs::write(&store_path, &json).unwrap();
+        let ts = TombstoneStore::open(store_path).unwrap();
+
+        let config = GcConfig {
+            interval: std::time::Duration::from_secs(3600),
+            tombstone_ttl: std::time::Duration::from_secs(1),
+            max_entries: 50000,
+        };
+        gc_sweep(dir.path(), &clocks, &ts, &write_lock, &config, 100)
+            .await
+            .unwrap();
+
+        // "old.txt" (created_at=1) past TTL → removed
+        assert_eq!(ts.len(), 1, "only old2.txt should remain");
+        assert!(
+            ts.entries().iter().any(|(k, _)| k == "old2.txt"),
+            "old2.txt should be kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn t2_live_file_clock_entry_not_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let clocks = temp_store();
+        let tombstones = temp_tombstone_store();
+        let write_lock = Arc::new(tokio::sync::Mutex::new(()));
+
+        // Create a real file and a clock entry for it.
+        std::fs::write(dir.path().join("live.txt"), b"hello").unwrap();
+        clocks.put("live.txt", clock(&[("dell", 1)])).unwrap();
+
+        let config = GcConfig {
+            interval: std::time::Duration::from_secs(3600),
+            tombstone_ttl: std::time::Duration::from_secs(1),
+            max_entries: 0, // aggressive cap
+        };
+        gc_sweep(dir.path(), &clocks, &tombstones, &write_lock, &config, 100)
+            .await
+            .unwrap();
+
+        // Live file's clock entry MUST be preserved.
+        assert_eq!(clocks.get("live.txt").get("dell"), 1);
+    }
+
+    #[tokio::test]
+    async fn t3_hard_cap_evicts_oldest_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let _tombstones = temp_tombstone_store();
+        let clocks = temp_store();
+        let write_lock = Arc::new(tokio::sync::Mutex::new(()));
+
+        // Create a tombstone store with entries directly.
+        let store_dir = tempfile::tempdir().unwrap();
+        let store_path = store_dir.path().join("tombstones.json");
+        let mut raw = BTreeMap::new();
+        // Entry A: created_at = 1 (oldest)
+        raw.insert(
+            "a.txt".to_string(),
+            TombstoneEntry {
+                clock: clock(&[("dell", 1)]),
+                created_at: 1,
+            },
+        );
+        // Entry B: created_at = 2
+        raw.insert(
+            "b.txt".to_string(),
+            TombstoneEntry {
+                clock: clock(&[("dell", 1)]),
+                created_at: 2,
+            },
+        );
+        let json = serde_json::to_string_pretty(&raw).unwrap();
+        std::fs::write(&store_path, &json).unwrap();
+        let ts = TombstoneStore::open(store_path.clone()).unwrap();
+
+        // Cap at 1 entry — should evict the oldest (a.txt).
+        let config = GcConfig {
+            interval: std::time::Duration::from_secs(3600),
+            tombstone_ttl: std::time::Duration::from_secs(9999), // no TTL eviction
+            max_entries: 1,
+        };
+        gc_sweep(dir.path(), &clocks, &ts, &write_lock, &config, 100)
+            .await
+            .unwrap();
+
+        assert_eq!(ts.len(), 1, "only 1 entry should remain after cap eviction");
+        assert!(
+            ts.entries().iter().any(|(k, _)| k == "b.txt"),
+            "b.txt should be kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn t4_hard_cap_does_not_evict_live_clock_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let clocks = temp_store();
+        let tombstones = temp_tombstone_store();
+        let write_lock = Arc::new(tokio::sync::Mutex::new(()));
+
+        // Create live files with clock entries.
+        for i in 0..5 {
+            let name = format!("live{i}.txt");
+            std::fs::write(dir.path().join(&name), b"data").unwrap();
+            clocks.put(&name, clock(&[("dell", 1)])).unwrap();
+        }
+
+        // Cap at 2 — should NOT evict live entries, just log a warning.
+        let config = GcConfig {
+            interval: std::time::Duration::from_secs(3600),
+            tombstone_ttl: std::time::Duration::from_secs(1),
+            max_entries: 2,
+        };
+        gc_sweep(dir.path(), &clocks, &tombstones, &write_lock, &config, 100)
+            .await
+            .unwrap();
+
+        // All live entries still present.
+        for i in 0..5 {
+            let name = format!("live{i}.txt");
+            assert_eq!(
+                clocks.get(&name).get("dell"),
+                1,
+                "{name} should be preserved"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn t5_gc_skips_contested_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let clocks = temp_store();
+        let _tombstones = temp_tombstone_store();
+        let write_lock = Arc::new(tokio::sync::Mutex::new(()));
+
+        // Create a tombstone past TTL.
+        let store_dir = tempfile::tempdir().unwrap();
+        let store_path = store_dir.path().join("tombstones.json");
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "contested.txt".to_string(),
+            TombstoneEntry {
+                clock: clock(&[("dell", 1)]),
+                created_at: 1,
+            },
+        );
+        let json = serde_json::to_string_pretty(&raw).unwrap();
+        std::fs::write(&store_path, &json).unwrap();
+        let ts = TombstoneStore::open(store_path).unwrap();
+
+        // Hold the write_lock so GC can't acquire it.
+        let _guard = write_lock.lock().await;
+
+        let config = GcConfig {
+            interval: std::time::Duration::from_secs(3600),
+            tombstone_ttl: std::time::Duration::from_secs(1),
+            max_entries: 50000,
+        };
+        gc_sweep(dir.path(), &clocks, &ts, &write_lock, &config, 100)
+            .await
+            .unwrap();
+
+        // The contested entry was NOT removed (lock was held).
+        assert_eq!(ts.len(), 1, "contested entry should not be removed");
     }
 }
