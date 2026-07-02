@@ -22,7 +22,7 @@ pub struct AppSnapshot {
     pub keys: HashMap<String, StateEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ConflictEntry {
     pub key: String,
     pub local_value: Vec<u8>,

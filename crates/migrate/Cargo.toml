@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "App-cooperative state migration SDK (ADR 0012)"
 
+[lib]
+name = "nexus_migrate"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 nexus-common = { path = "../common" }
 nexus-proto = { path = "../proto" }

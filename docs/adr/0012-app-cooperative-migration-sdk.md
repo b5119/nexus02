@@ -206,6 +206,84 @@ schema version mismatches fail hard rather than silently producing
 corrupted state. This is the safe default: the app must explicitly
 opt in to schema evolution.
 
+### 6. JNI / Android bindings
+
+**Resolution: A cfg-gated `android` module with six `#[no_mangle]`
+functions, backed by its own global state (independent of the Rust-native
+`MigrateSdk` / `MigratableApp` path).**
+
+The JNI layer does NOT expose the `MigratableApp` trait to Kotlin.
+Instead it manages a simple in-memory key-value store (`HashMap<String,
+StateEntry>`) that the Kotlin side populates via `putStateValue` /
+`getStateValue` and exports via `exportSnapshot` / `importSnapshot`.
+This avoids passing JNI objects through the trait system, which is
+fragile across GC cycles.
+
+#### Naming convention
+
+Package: `com.vectorzero.nexus.migrate`
+Class: `NexusMigrate` (Kotlin `object`)
+
+| Kotlin function                      | JNI symbol                                                              |
+|--------------------------------------|-------------------------------------------------------------------------|
+| `NexusMigrate.init(deviceId)`        | `Java_com_vectorzero_nexus_migrate_NexusMigrate_init`                   |
+| `NexusMigrate.registerKey(...)`      | `Java_com_vectorzero_nexus_migrate_NexusMigrate_registerKey`            |
+| `NexusMigrate.exportSnapshot()`      | `Java_com_vectorzero_nexus_migrate_NexusMigrate_exportSnapshot`         |
+| `NexusMigrate.importSnapshot(...)`   | `Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot`         |
+| `NexusMigrate.putStateValue(...)`    | `Java_com_vectorzero_nexus_migrate_NexusMigrate_putStateValue`          |
+| `NexusMigrate.getValue(key)`         | `Java_com_vectorzero_nexus_migrate_NexusMigrate_getStateValue`          |
+
+#### Kotlin companion file
+
+`crates/migrate/android/NexusMigrate.kt` serves as the reference /
+documentation contract. It is not compiled by Cargo; an Android app
+copies or submodules this file into its own source tree.
+
+```kotlin
+object NexusMigrate {
+    init { System.loadLibrary("nexus_migrate") }
+    external fun init(deviceId: String)
+    external fun registerKey(key: String, policy: Int, schemaVersion: Int)
+    external fun exportSnapshot(): ByteArray
+    external fun importSnapshot(snapshotBytes: ByteArray): String
+    external fun putStateValue(key: String, value: ByteArray)
+    external fun getValue(key: String): ByteArray
+}
+```
+
+#### Crate-type change
+
+The crate produces both `cdylib` (the `.so` loaded by `System.loadLibrary`
+on Android) and `rlib` (the static library used by Rust-native consumers).
+The `[lib]` section in `Cargo.toml`:
+
+```toml
+[lib]
+name = "nexus_migrate"
+crate-type = ["cdylib", "rlib"]
+```
+
+The `cdylib` output is `target/<triple>/release/libnexus_migrate.so`.
+The `rlib` output continues to serve the existing `cargo test` and
+`cargo build -p nexus-migrate` workflows unchanged.
+
+#### Known limitations (JNI-specific)
+
+- **AppMerge via single dispatch (issue #34):** The JNI layer currently
+  does not register per-key merge callbacks. When an `importSnapshot`
+  encounters a concurrent AppMerge key, the conflict is returned in the
+  JSON response for the Kotlin side to handle manually. Per-key merge
+  handler registration (matching the original `setMergeHandler` sketch)
+  is deferred until after the JNI bindings exist, so the Kotlin-side
+  impact is visible before the API is redesigned.
+- **Schema migration callbacks:** Not yet exposed via JNI. If an incoming
+  snapshot has an older schema version, the value is returned as a
+  conflict rather than migrated automatically.
+- **Transport layer:** `PushSnapshot` / `PullSnapshot` RPCs exist in the
+  proto but are not wired into this SDK layer yet.
+- **Idiomatic Kotlin ergonomics:** Suspend functions, `Flow`-based
+  conflict streams, etc. are deferred to a follow-up PR.
+
 ## Consequences
 
 - Apps that link the SDK get a principled state migration path

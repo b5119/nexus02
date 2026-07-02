@@ -72,6 +72,7 @@ struct GlobalState {
     registrations: HashMap<String, KeyRegistration>,
     device_id: String,
     vector_clock: nexus_common::VectorClock,
+    store: HashMap<String, StateEntry>,
 }
 
 /// Initialise the global SDK state.  Must be called before any JNI entry
@@ -82,6 +83,7 @@ pub fn init_global(app: Box<dyn MigratableApp>, device_id: String) -> Result<(),
         registrations: HashMap::new(),
         device_id,
         vector_clock: nexus_common::VectorClock::new(),
+        store: HashMap::new(),
     };
     GLOBAL
         .set(Mutex::new(state))
@@ -205,6 +207,39 @@ pub fn import_snapshot(snapshot: AppSnapshot) -> Result<ConflictSet, MigrateErro
         state.app.import_state(resolved)?;
         Ok(conflict_set)
     })
+}
+
+/// Set a key's value in the global state store.
+/// Uses the registered policy if the key exists, otherwise LastWriteWins.
+pub fn put_state_value(key: &str, value: Vec<u8>) {
+    let _ = with_global(|state| {
+        let policy = state
+            .registrations
+            .get(key)
+            .map(|r| r.policy)
+            .unwrap_or(ConflictPolicy::LastWriteWins);
+        let schema_version = state
+            .registrations
+            .get(key)
+            .map(|r| r.schema_version)
+            .unwrap_or(0);
+        state.store.insert(
+            key.to_string(),
+            StateEntry {
+                value,
+                conflict_policy: policy,
+                schema_version,
+            },
+        );
+        Ok(())
+    });
+}
+
+/// Get a key's value from the global state store.
+pub fn get_state_value(key: &str) -> Option<Vec<u8>> {
+    with_global(|state| Ok(state.store.get(key).map(|e| e.value.clone())))
+        .ok()
+        .flatten()
 }
 
 // ── MigrateSdk (Rust-native API) ─────────────────────────────────────────
