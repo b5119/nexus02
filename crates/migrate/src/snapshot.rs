@@ -33,4 +33,5 @@ pub struct ConflictEntry {
 #[derive(Debug, Clone, Default)]
 pub struct ConflictSet {
     pub conflicts: Vec<ConflictEntry>,
+    pub schema_dropped_keys: Vec<String>,
 }

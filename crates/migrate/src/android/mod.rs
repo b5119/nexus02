@@ -54,6 +54,7 @@ fn local_snapshot(state: &JniState) -> AppSnapshot {
 #[derive(Serialize)]
 struct ConflictReport {
     conflicts: Vec<ConflictEntry>,
+    schema_dropped_keys: Vec<String>,
 }
 
 // ── JNI: init ──────────────────────────────────────────────────────────
@@ -182,6 +183,7 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot(
 
         // ── schema version check — remove keys that need migration or are mismatched ──
         let mut remote = remote;
+        let mut schema_dropped_keys: Vec<String> = Vec::new();
         remote.keys.retain(|key, entry| {
             let Some(reg) = state.registrations.get(key) else {
                 return true;
@@ -195,12 +197,14 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot(
                          v{from_version}→v{} — omitted from merge (issue #34)",
                         reg.schema_version,
                     );
+                    schema_dropped_keys.push(key.clone());
                     false
                 }
                 Err(e) => {
                     tracing::warn!(
                         "importSnapshot: schema mismatch for '{key}': {e} — omitted from merge"
                     );
+                    schema_dropped_keys.push(key.clone());
                     false
                 }
                 _ => false,
@@ -221,6 +225,7 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot(
 
         Ok(ConflictReport {
             conflicts: conflict_set.conflicts,
+            schema_dropped_keys,
         })
     });
 

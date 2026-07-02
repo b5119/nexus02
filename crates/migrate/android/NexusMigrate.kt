@@ -83,10 +83,10 @@ object NexusMigrate {
     /**
      * Export the current local state as a JSON-encoded [AppSnapshot].
      *
-     * @return UTF-8 JSON bytes — deserializable to [AppSnapshot] on the
-     *         receiving side (or storable to a file / wire format).
+     * @return JSON-encoded AppSnapshot as UTF-8 bytes,
+     *         or null if the SDK is not initialized or serialization fails.
      */
-    external fun exportSnapshot(): ByteArray
+    external fun exportSnapshot(): ByteArray?
 
     /**
      * Import a remote snapshot, resolve conflicts, and apply the result.
@@ -94,8 +94,12 @@ object NexusMigrate {
      * @param snapshotBytes  UTF-8 JSON bytes of an [AppSnapshot] produced
      *                       by a peer's [exportSnapshot].
      * @return JSON object with any unresolved conflicts:
-     *         `{"conflicts":[{"key":"...","local_value":[],"remote_value":[],"schema_version":N}]}`
-     *         Returns `"{}"` when no conflicts remain.
+     *         `{"conflicts":[...],"schema_dropped_keys":["key1","key2"]}`
+     *         `conflicts` lists keys with concurrent edits that could not be
+     *         resolved automatically. `schema_dropped_keys` lists keys that
+     *         were omitted from the merge because their schema version could
+     *         not be handled (too new or migration unavailable).
+     *         Returns `"{}"` when no conflicts remain and no keys were dropped.
      */
     external fun importSnapshot(snapshotBytes: ByteArray): String
 
@@ -111,8 +115,9 @@ object NexusMigrate {
     /**
      * Read a key's current value from the local state store.
      *
-     * @return The stored bytes, or an empty array if the key was never set
-     *         (or was removed by an import).
+     * @return The stored bytes, or null if the key was never set, was removed
+     *         by an import, or an error occurred. Check for null before use —
+     *         do not assume an empty array.
      */
-    external fun getStateValue(key: String): ByteArray
+    external fun getStateValue(key: String): ByteArray?
 }
