@@ -9,11 +9,11 @@ use tonic::transport::Channel;
 
 pub struct MigrateClient {
     client: MigrateServiceClient<Channel>,
-    auth_token: String,
+    _auth_token: String,
 }
 
 impl MigrateClient {
-    pub async fn connect(addr: String, auth_token: String) -> Result<Self, MigrateError> {
+    pub async fn connect(addr: String, _auth_token: String) -> Result<Self, MigrateError> {
         let endpoint = tonic::transport::Endpoint::new(addr)
             .map_err(|e| MigrateError::Transport(format!("invalid address: {e}")))?;
         let channel = endpoint
@@ -22,7 +22,7 @@ impl MigrateClient {
             .map_err(|e| MigrateError::Transport(format!("connect failed: {e}")))?;
         Ok(Self {
             client: MigrateServiceClient::new(channel),
-            auth_token,
+            _auth_token,
         })
     }
 
