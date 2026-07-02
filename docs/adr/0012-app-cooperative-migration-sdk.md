@@ -231,7 +231,7 @@ Class: `NexusMigrate` (Kotlin `object`)
 | `NexusMigrate.exportSnapshot()`      | `Java_com_vectorzero_nexus_migrate_NexusMigrate_exportSnapshot`         |
 | `NexusMigrate.importSnapshot(...)`   | `Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot`         |
 | `NexusMigrate.putStateValue(...)`    | `Java_com_vectorzero_nexus_migrate_NexusMigrate_putStateValue`          |
-| `NexusMigrate.getValue(key)`         | `Java_com_vectorzero_nexus_migrate_NexusMigrate_getStateValue`          |
+| `NexusMigrate.getStateValue(key)`    | `Java_com_vectorzero_nexus_migrate_NexusMigrate_getStateValue`          |
 
 #### Kotlin companion file
 
@@ -247,7 +247,7 @@ object NexusMigrate {
     external fun exportSnapshot(): ByteArray
     external fun importSnapshot(snapshotBytes: ByteArray): String
     external fun putStateValue(key: String, value: ByteArray)
-    external fun getValue(key: String): ByteArray
+    external fun getStateValue(key: String): ByteArray
 }
 ```
 

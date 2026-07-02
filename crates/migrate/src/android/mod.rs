@@ -132,16 +132,25 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_exportSnapshot(
     env: JNIEnv,
     _class: JClass,
 ) -> jbyteArray {
-    let bytes = with_jni(|state| {
+    let bytes = match with_jni(|state| {
         state.vector_clock.increment(&state.device_id);
         let snapshot = local_snapshot(state);
         serde_json::to_vec(&snapshot).map_err(|e| format!("serialize snapshot: {e}"))
-    })
-    .unwrap_or_default();
+    }) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("exportSnapshot: {e}");
+            return std::ptr::null_mut();
+        }
+    };
 
-    env.byte_array_from_slice(&bytes)
-        .expect("exportSnapshot: failed to create byte array")
-        .into_raw()
+    match env.byte_array_from_slice(&bytes) {
+        Ok(arr) => arr.into_raw(),
+        Err(e) => {
+            tracing::warn!("exportSnapshot: failed to create byte array: {e}");
+            std::ptr::null_mut()
+        }
+    }
 }
 
 // ── JNI: importSnapshot ────────────────────────────────────────────────
@@ -171,31 +180,32 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot(
     let report = with_jni(|state| {
         let local = local_snapshot(state);
 
-        // ── schema version check ──
+        // ── schema version check — remove keys that need migration or are mismatched ──
         let mut remote = remote;
-        for (key, entry) in &mut remote.keys {
-            if let Some(reg) = state.registrations.get(key) {
-                let action = crate::schema::check_schema_version(
-                    key,
-                    entry.schema_version,
-                    reg.schema_version,
-                );
-                match action {
-                    Ok(crate::schema::SchemaAction::Current) => {}
-                    Ok(crate::schema::SchemaAction::Migrate { from_version, .. }) => {
-                        tracing::warn!(
-                            "importSnapshot: schema migration needed for '{key}' \
-                             v{from_version}→v{} — returning as conflict (issue #34)",
-                            reg.schema_version,
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("importSnapshot: schema mismatch for '{key}': {e}");
-                    }
-                    _ => {}
+        remote.keys.retain(|key, entry| {
+            let Some(reg) = state.registrations.get(key) else {
+                return true;
+            };
+            match crate::schema::check_schema_version(key, entry.schema_version, reg.schema_version)
+            {
+                Ok(crate::schema::SchemaAction::Current) => true,
+                Ok(crate::schema::SchemaAction::Migrate { from_version, .. }) => {
+                    tracing::warn!(
+                        "importSnapshot: schema migration needed for '{key}' \
+                         v{from_version}→v{} — omitted from merge (issue #34)",
+                        reg.schema_version,
+                    );
+                    false
                 }
+                Err(e) => {
+                    tracing::warn!(
+                        "importSnapshot: schema mismatch for '{key}': {e} — omitted from merge"
+                    );
+                    false
+                }
+                _ => false,
             }
-        }
+        });
 
         // ── resolve conflicts ──
         let (resolved_keys, conflict_set) = crate::conflict::resolve_conflicts(&local, &remote)
@@ -255,7 +265,7 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_putStateValue(
         }
     };
 
-    let _ = with_jni(|state| {
+    if let Err(e) = with_jni(|state| {
         let policy = state
             .registrations
             .get(&key_str)
@@ -275,7 +285,9 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_putStateValue(
             },
         );
         Ok(())
-    });
+    }) {
+        tracing::warn!("putStateValue: {e}");
+    }
 }
 
 // ── JNI: getStateValue ─────────────────────────────────────────────────

@@ -212,7 +212,7 @@ pub fn import_snapshot(snapshot: AppSnapshot) -> Result<ConflictSet, MigrateErro
 /// Set a key's value in the global state store.
 /// Uses the registered policy if the key exists, otherwise LastWriteWins.
 pub fn put_state_value(key: &str, value: Vec<u8>) {
-    let _ = with_global(|state| {
+    if let Err(e) = with_global(|state| {
         let policy = state
             .registrations
             .get(key)
@@ -232,14 +232,20 @@ pub fn put_state_value(key: &str, value: Vec<u8>) {
             },
         );
         Ok(())
-    });
+    }) {
+        tracing::warn!("put_state_value: {e}");
+    }
 }
 
 /// Get a key's value from the global state store.
 pub fn get_state_value(key: &str) -> Option<Vec<u8>> {
-    with_global(|state| Ok(state.store.get(key).map(|e| e.value.clone())))
-        .ok()
-        .flatten()
+    match with_global(|state| Ok(state.store.get(key).map(|e| e.value.clone()))) {
+        Ok(val) => val,
+        Err(e) => {
+            tracing::warn!("get_state_value: {e}");
+            None
+        }
+    }
 }
 
 // ── MigrateSdk (Rust-native API) ─────────────────────────────────────────
