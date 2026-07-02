@@ -1,0 +1,67 @@
+syntax = "proto3";
+package nexus.migrate.v1;
+
+// MigrateService handles app-cooperative state migration between devices
+// (ADR 0012). Unlike FileService which operates at the file level, this
+// service operates on named key-value pairs that apps explicitly register.
+//
+// Auth: reuses the existing token-based mechanism. The client sets
+// "x-nexus-token" metadata header (same as FileService).
+service MigrateService {
+  // PushSnapshot sends the local app snapshot to a remote host. The host
+  // resolves per-key conflicts using the declared policies and returns any
+  // unresolved conflicts (KeepBoth keys that actually conflicted).
+  rpc PushSnapshot (PushSnapshotRequest) returns (PushSnapshotResponse);
+
+  // PullSnapshot requests the remote host's current app snapshot. The
+  // caller provides its own clock so the host can compute the diff.
+  rpc PullSnapshot (PullSnapshotRequest) returns (PullSnapshotResponse);
+}
+
+message VectorClock {
+  map<string, uint64> counters = 1;
+}
+
+enum ConflictPolicy {
+  LAST_WRITE_WINS = 0;
+  APP_MERGE = 1;
+  KEEP_BOTH = 2;
+}
+
+message StateEntry {
+  bytes value = 1;
+  ConflictPolicy policy = 2;
+  uint32 schema_version = 3;
+}
+
+message AppSnapshot {
+  string device_id = 1;
+  VectorClock clock = 2;
+  map<string, StateEntry> keys = 3;
+}
+
+message PushSnapshotRequest {
+  AppSnapshot snapshot = 1;
+}
+
+message ConflictEntry {
+  string key = 1;
+  bytes local_value = 2;
+  bytes remote_value = 3;
+}
+
+message PushSnapshotResponse {
+  // Keys whose ConflictPolicy::KEEP_BOTH had an actual conflict. The caller
+  // can inspect and resolve these later.
+  repeated ConflictEntry conflicts = 1;
+}
+
+message PullSnapshotRequest {
+  // The requesting device's clock. The host uses this to compute which
+  // entries have changed since the last sync.
+  VectorClock device_clock = 1;
+}
+
+message PullSnapshotResponse {
+  AppSnapshot snapshot = 1;
+}

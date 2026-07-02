@@ -1,0 +1,21 @@
+[package]
+name = "nexus-migrate"
+version = "0.1.0"
+edition = "2021"
+description = "App-cooperative state migration SDK (ADR 0012)"
+
+[dependencies]
+nexus-common = { path = "../common" }
+nexus-proto = { path = "../proto" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false, features = ["invocation"] }
+
+[dev-dependencies]
+tempfile = "3"
