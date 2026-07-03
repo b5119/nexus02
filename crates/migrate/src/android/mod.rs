@@ -1,13 +1,14 @@
 //! Android JNI bindings for nexus-migrate.
 //!
-//! Exposes six functions matching the Kotlin `NexusMigrate` companion object
+//! Exports six functions matching the Kotlin `NexusMigrate` companion object
 //! (`com.vectorzero.nexus.migrate.NexusMigrate`).  The JNI layer manages its
 //! own global state (device_id, vector clock, key registrations, key-value
 //! store) independently of the Rust-native `MigrateSdk` / `MigratableApp` API.
 
+use jni::errors::Outcome;
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jbyteArray, jint, jstring};
-use jni::JNIEnv;
+use jni::EnvUnowned;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -60,15 +61,22 @@ struct ConflictReport {
 // ── JNI: init ──────────────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_init(
-    mut env: JNIEnv,
-    _class: JClass,
-    device_id: JString,
+pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_init<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    device_id: JString<'local>,
 ) {
-    let device_id: String = match env.get_string(&device_id) {
-        Ok(s) => s.into(),
-        Err(e) => {
+    let device_id: String = match unowned_env
+        .with_env(|env| device_id.try_to_string(env))
+        .into_outcome()
+    {
+        Outcome::Ok(s) => s,
+        Outcome::Err(e) => {
             tracing::warn!("NexusMigrate.init: failed to read device_id string: {e}");
+            return;
+        }
+        Outcome::Panic(_) => {
+            tracing::warn!("NexusMigrate.init: panic reading device_id");
             return;
         }
     };
@@ -88,20 +96,28 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_init(
 // ── JNI: registerKey ───────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_registerKey(
-    mut env: JNIEnv,
-    _class: JClass,
-    key: JString,
+pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_registerKey<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    key: JString<'local>,
     policy: jint,
     schema_version: jint,
 ) {
-    let key_str: String = match env.get_string(&key) {
-        Ok(s) => s.into(),
-        Err(e) => {
+    let key_str: String = match unowned_env
+        .with_env(|env| key.try_to_string(env))
+        .into_outcome()
+    {
+        Outcome::Ok(s) => s,
+        Outcome::Err(e) => {
             tracing::warn!("registerKey: failed to read key string: {e}");
             return;
         }
+        Outcome::Panic(_) => {
+            tracing::warn!("registerKey: panic reading key");
+            return;
+        }
     };
+
     let policy = match policy {
         0 => ConflictPolicy::LastWriteWins,
         1 => ConflictPolicy::AppMerge,
@@ -129,9 +145,9 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_registerKey(
 // ── JNI: exportSnapshot ────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_exportSnapshot(
-    env: JNIEnv,
-    _class: JClass,
+pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_exportSnapshot<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
 ) -> jbyteArray {
     let bytes = match with_jni(|state| {
         state.vector_clock.increment(&state.device_id);
@@ -145,10 +161,17 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_exportSnapshot(
         }
     };
 
-    match env.byte_array_from_slice(&bytes) {
-        Ok(arr) => arr.into_raw(),
-        Err(e) => {
+    match unowned_env
+        .with_env(|env| env.byte_array_from_slice(&bytes).map(|jba| jba.into_raw()))
+        .into_outcome()
+    {
+        Outcome::Ok(arr) => arr,
+        Outcome::Err(e) => {
             tracing::warn!("exportSnapshot: failed to create byte array: {e}");
+            std::ptr::null_mut()
+        }
+        Outcome::Panic(_) => {
+            tracing::warn!("exportSnapshot: panic creating byte array");
             std::ptr::null_mut()
         }
     }
@@ -157,15 +180,22 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_exportSnapshot(
 // ── JNI: importSnapshot ────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot(
-    env: JNIEnv,
-    _class: JClass,
-    snapshot_bytes: JByteArray,
+pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    snapshot_bytes: JByteArray<'local>,
 ) -> jstring {
-    let bytes: Vec<u8> = match env.convert_byte_array(&snapshot_bytes) {
-        Ok(b) => b,
-        Err(e) => {
+    let bytes: Vec<u8> = match unowned_env
+        .with_env(|env| env.convert_byte_array(&snapshot_bytes))
+        .into_outcome()
+    {
+        Outcome::Ok(b) => b,
+        Outcome::Err(e) => {
             tracing::warn!("importSnapshot: failed to read byte array: {e}");
+            return std::ptr::null_mut();
+        }
+        Outcome::Panic(_) => {
+            tracing::warn!("importSnapshot: panic reading byte array");
             return std::ptr::null_mut();
         }
     };
@@ -181,7 +211,6 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot(
     let report = with_jni(|state| {
         let local = local_snapshot(state);
 
-        // ── schema version check — remove keys that need migration or are mismatched ──
         let mut remote = remote;
         let mut schema_dropped_keys: Vec<String> = Vec::new();
         remote.keys.retain(|key, entry| {
@@ -211,14 +240,11 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot(
             }
         });
 
-        // ── resolve conflicts ──
         let (resolved_keys, conflict_set) = crate::conflict::resolve_conflicts(&local, &remote)
             .map_err(|e| format!("resolve_conflicts: {e}"))?;
 
-        // ── write resolved keys back to store ──
         state.store = resolved_keys;
 
-        // ── merge vector clock ──
         state
             .vector_clock
             .merge(&nexus_common::VectorClock(remote.vector_clock));
@@ -237,35 +263,56 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_importSnapshot(
         }
     };
 
-    env.new_string(&json)
-        .unwrap_or_else(|e| {
+    match unowned_env
+        .with_env(|env| env.new_string(&json).map(|s| s.into_raw()))
+        .into_outcome()
+    {
+        Outcome::Ok(s) => s,
+        Outcome::Err(e) => {
             tracing::warn!("importSnapshot: failed to create return string: {e}");
-            env.new_string("{}")
-                .expect("fallback string creation failed")
-        })
-        .into_raw()
+            std::ptr::null_mut()
+        }
+        Outcome::Panic(_) => {
+            tracing::warn!("importSnapshot: panic creating return string");
+            std::ptr::null_mut()
+        }
+    }
 }
 
 // ── JNI: putStateValue ─────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_putStateValue(
-    mut env: JNIEnv,
-    _class: JClass,
-    key: JString,
-    value: JByteArray,
+pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_putStateValue<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    key: JString<'local>,
+    value: JByteArray<'local>,
 ) {
-    let key_str: String = match env.get_string(&key) {
-        Ok(s) => s.into(),
-        Err(e) => {
+    let key_str: String = match unowned_env
+        .with_env(|env| key.try_to_string(env))
+        .into_outcome()
+    {
+        Outcome::Ok(s) => s,
+        Outcome::Err(e) => {
             tracing::warn!("putStateValue: failed to read key string: {e}");
             return;
         }
+        Outcome::Panic(_) => {
+            tracing::warn!("putStateValue: panic reading key");
+            return;
+        }
     };
-    let value_bytes: Vec<u8> = match env.convert_byte_array(&value) {
-        Ok(b) => b,
-        Err(e) => {
+    let value_bytes: Vec<u8> = match unowned_env
+        .with_env(|env| env.convert_byte_array(&value))
+        .into_outcome()
+    {
+        Outcome::Ok(b) => b,
+        Outcome::Err(e) => {
             tracing::warn!("putStateValue: failed to read byte array: {e}");
+            return;
+        }
+        Outcome::Panic(_) => {
+            tracing::warn!("putStateValue: panic reading byte array");
             return;
         }
     };
@@ -298,15 +345,22 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_putStateValue(
 // ── JNI: getStateValue ─────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_getStateValue(
-    mut env: JNIEnv,
-    _class: JClass,
-    key: JString,
+pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_getStateValue<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    key: JString<'local>,
 ) -> jbyteArray {
-    let key_str: String = match env.get_string(&key) {
-        Ok(s) => s.into(),
-        Err(e) => {
+    let key_str: String = match unowned_env
+        .with_env(|env| key.try_to_string(env))
+        .into_outcome()
+    {
+        Outcome::Ok(s) => s,
+        Outcome::Err(e) => {
             tracing::warn!("getStateValue: failed to read key string: {e}");
+            return std::ptr::null_mut();
+        }
+        Outcome::Panic(_) => {
+            tracing::warn!("getStateValue: panic reading key");
             return std::ptr::null_mut();
         }
     };
@@ -316,7 +370,18 @@ pub extern "C" fn Java_com_vectorzero_nexus_migrate_NexusMigrate_getStateValue(
         .flatten()
         .unwrap_or_default();
 
-    env.byte_array_from_slice(&value)
-        .expect("getStateValue: failed to create byte array")
-        .into_raw()
+    match unowned_env
+        .with_env(|env| env.byte_array_from_slice(&value).map(|jba| jba.into_raw()))
+        .into_outcome()
+    {
+        Outcome::Ok(arr) => arr,
+        Outcome::Err(e) => {
+            tracing::warn!("getStateValue: failed to create byte array: {e}");
+            std::ptr::null_mut()
+        }
+        Outcome::Panic(_) => {
+            tracing::warn!("getStateValue: panic creating byte array");
+            std::ptr::null_mut()
+        }
+    }
 }
