@@ -10,8 +10,8 @@
 //! deferred to a follow-up PR.
 
 use jni::objects::{JByteArray, JClass, JString};
-use jni::EnvUnowned;
 use jni::sys::jbyteArray;
+use jni::EnvUnowned;
 
 use crate::snapshot::{AppSnapshot, ConflictPolicy};
 
@@ -70,7 +70,8 @@ pub extern "C" fn Java_com_nexus_migrate_NexusMigrate_nativeExport<'local>(
     let bytes = serde_json::to_vec(&snapshot).unwrap_or_default();
     unowned_env
         .with_env(|env| -> Result<_, jni::errors::Error> {
-            env.byte_array_from_slice(&bytes).map(|jba| jba.into_raw() as jbyteArray)
+            env.byte_array_from_slice(&bytes)
+                .map(|jba| jba.into_raw() as jbyteArray)
         })
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
