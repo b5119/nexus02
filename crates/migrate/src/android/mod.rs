@@ -9,11 +9,11 @@
 //! idiomatic Kotlin ergonomics (suspend functions, Flow, etc.) are
 //! deferred to a follow-up PR.
 
-use jni::objects::{JClass, JString, JValue};
-use jni::sys::{jbyteArray, jstring};
-use jni::JNIEnv;
+use jni::objects::{JByteArray, JClass, JString};
+use jni::EnvUnowned;
+use jni::sys::jbyteArray;
 
-use crate::snapshot::{AppSnapshot, ConflictPolicy, StateEntry};
+use crate::snapshot::{AppSnapshot, ConflictPolicy};
 
 // ── Global callback state ────────────────────────────────────────────
 // The Kotlin side registers a single global callback object. All JNI
@@ -34,17 +34,16 @@ pub trait AndroidCallbacks: Send + Sync {
 // ── JNI entry points ─────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "C" fn Java_com_nexus_migrate_NexusMigrate_nativeRegisterKey(
-    mut env: JNIEnv,
-    _class: JClass,
-    key: JString,
+pub extern "C" fn Java_com_nexus_migrate_NexusMigrate_nativeRegisterKey<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    key: JString<'local>,
     policy: jni::sys::jint,
     schema_version: jni::sys::jint,
 ) {
-    let key_str: String = env
-        .get_string(&key)
-        .expect("failed to get key string")
-        .into();
+    let key_str: String = unowned_env
+        .with_env(|env| key.try_to_string(env))
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
     let policy = match policy {
         0 => ConflictPolicy::LastWriteWins,
         1 => ConflictPolicy::AppMerge,
@@ -63,27 +62,31 @@ pub extern "C" fn Java_com_nexus_migrate_NexusMigrate_nativeRegisterKey(
 }
 
 #[no_mangle]
-pub extern "C" fn Java_com_nexus_migrate_NexusMigrate_nativeExport(
-    mut env: JNIEnv,
-    _class: JClass,
+pub extern "C" fn Java_com_nexus_migrate_NexusMigrate_nativeExport<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
 ) -> jbyteArray {
     let snapshot = crate::export_snapshot();
     let bytes = serde_json::to_vec(&snapshot).unwrap_or_default();
-    let output = env
-        .byte_array_from_slice(&bytes)
-        .expect("failed to create byte array");
-    output.into_raw()
+    unowned_env
+        .with_env(|env| -> Result<_, jni::errors::Error> {
+            env.byte_array_from_slice(&bytes).map(|jba| jba.into_raw() as jbyteArray)
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 #[no_mangle]
-pub extern "C" fn Java_com_nexus_migrate_NexusMigrate_nativeImport(
-    mut env: JNIEnv,
-    _class: JClass,
+pub extern "C" fn Java_com_nexus_migrate_NexusMigrate_nativeImport<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
     snapshot_bytes: jbyteArray,
 ) {
-    let bytes = env
-        .convert_byte_array(&snapshot_bytes)
-        .expect("failed to read byte array");
+    let bytes: Vec<u8> = unowned_env
+        .with_env(|env| -> Result<_, jni::errors::Error> {
+            let jba = unsafe { JByteArray::from_raw(env, snapshot_bytes) };
+            env.convert_byte_array(&jba)
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
     let snapshot: AppSnapshot = match serde_json::from_slice(&bytes) {
         Ok(s) => s,
         Err(e) => {
