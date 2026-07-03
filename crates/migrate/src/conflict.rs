@@ -77,7 +77,13 @@ pub fn resolve_conflicts(
         }
     }
 
-    Ok((resolved, ConflictSet { conflicts }))
+    Ok((
+        resolved,
+        ConflictSet {
+            conflicts,
+            ..Default::default()
+        },
+    ))
 }
 
 #[cfg(test)]

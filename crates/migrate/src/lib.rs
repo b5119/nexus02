@@ -72,6 +72,7 @@ struct GlobalState {
     registrations: HashMap<String, KeyRegistration>,
     device_id: String,
     vector_clock: nexus_common::VectorClock,
+    store: HashMap<String, StateEntry>,
 }
 
 /// Initialise the global SDK state.  Must be called before any JNI entry
@@ -82,6 +83,7 @@ pub fn init_global(app: Box<dyn MigratableApp>, device_id: String) -> Result<(),
         registrations: HashMap::new(),
         device_id,
         vector_clock: nexus_common::VectorClock::new(),
+        store: HashMap::new(),
     };
     GLOBAL
         .set(Mutex::new(state))
@@ -134,30 +136,22 @@ pub fn import_snapshot(snapshot: AppSnapshot) -> Result<ConflictSet, MigrateErro
     with_global(|state| {
         let local = state.app.export_state()?;
 
-        // ── schema version check ──
+        // ── schema version check — drop keys that cannot be handled ──
         let mut remote = snapshot;
-        for (key, entry) in &mut remote.keys {
-            if let Some(reg) = state.registrations.get(key) {
-                match schema::check_schema_version(key, entry.schema_version, reg.schema_version)? {
-                    schema::SchemaAction::Current => {}
-                    schema::SchemaAction::Migrate { from_version, .. } => {
-                        let old = std::mem::take(&mut entry.value);
-                        let migrated =
-                            state
-                                .app
-                                .migrate_schema(key, from_version, old)
-                                .map_err(|e| {
-                                    MigrateError::CallbackFailed(format!(
-                                        "migrate_schema failed for '{key}': {e}"
-                                    ))
-                                })?;
-                        entry.value = migrated;
-                        entry.schema_version = reg.schema_version;
-                    }
-                    schema::SchemaAction::TooNew { .. } => unreachable!(),
-                }
-            }
-        }
+        let schema_dropped_keys = filter_schema_keys(
+            &mut remote,
+            &state.registrations,
+            &mut |key, from_version, old| {
+                state
+                    .app
+                    .migrate_schema(key, from_version, old)
+                    .map_err(|e| {
+                        MigrateError::CallbackFailed(format!(
+                            "migrate_schema failed for '{key}': {e}"
+                        ))
+                    })
+            },
+        );
 
         // ── resolve conflicts ──
         let (mut resolved_keys, mut conflict_set) = conflict::resolve_conflicts(&local, &remote)?;
@@ -203,8 +197,99 @@ pub fn import_snapshot(snapshot: AppSnapshot) -> Result<ConflictSet, MigrateErro
         };
 
         state.app.import_state(resolved)?;
+        conflict_set.schema_dropped_keys = schema_dropped_keys;
         Ok(conflict_set)
     })
+}
+
+/// Shared schema version check: for each key in `remote.keys`, drop keys
+/// that are too new or need migration when migration fails. Returns the list
+/// of dropped key names (removed from `remote.keys` in place).
+fn filter_schema_keys<M>(
+    remote: &mut AppSnapshot,
+    registrations: &HashMap<String, KeyRegistration>,
+    migrator: &mut M,
+) -> Vec<String>
+where
+    M: FnMut(&str, u32, Vec<u8>) -> Result<Vec<u8>, MigrateError>,
+{
+    let mut schema_dropped_keys: Vec<String> = Vec::new();
+    let mut keys_to_remove: Vec<String> = Vec::new();
+    for (key, entry) in &mut remote.keys {
+        let reg = match registrations.get(key) {
+            Some(r) => r.clone(),
+            None => continue,
+        };
+        match schema::check_schema_version(key, entry.schema_version, reg.schema_version) {
+            Ok(schema::SchemaAction::Current) => {}
+            Ok(schema::SchemaAction::Migrate { from_version, .. }) => {
+                let old = std::mem::take(&mut entry.value);
+                match migrator(key, from_version, old) {
+                    Ok(migrated) => {
+                        entry.value = migrated;
+                        entry.schema_version = reg.schema_version;
+                    }
+                    Err(e) => {
+                        tracing::warn!("schema migration failed for '{key}': {e} — dropping key");
+                        schema_dropped_keys.push(key.clone());
+                        keys_to_remove.push(key.clone());
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("schema mismatch for '{key}': {e} — dropping key");
+                schema_dropped_keys.push(key.clone());
+                keys_to_remove.push(key.clone());
+            }
+            Ok(schema::SchemaAction::TooNew { .. }) => {
+                schema_dropped_keys.push(key.clone());
+                keys_to_remove.push(key.clone());
+            }
+        }
+    }
+    for key in &keys_to_remove {
+        remote.keys.remove(key);
+    }
+    schema_dropped_keys
+}
+
+/// Set a key's value in the global state store.
+/// Uses the registered policy if the key exists, otherwise LastWriteWins.
+pub fn put_state_value(key: &str, value: Vec<u8>) {
+    if let Err(e) = with_global(|state| {
+        let policy = state
+            .registrations
+            .get(key)
+            .map(|r| r.policy)
+            .unwrap_or(ConflictPolicy::LastWriteWins);
+        let schema_version = state
+            .registrations
+            .get(key)
+            .map(|r| r.schema_version)
+            .unwrap_or(0);
+        state.store.insert(
+            key.to_string(),
+            StateEntry {
+                value,
+                conflict_policy: policy,
+                schema_version,
+            },
+        );
+        Ok(())
+    }) {
+        tracing::warn!("put_state_value: {e}");
+    }
+}
+
+/// Get a key's value from the global state store.
+pub fn get_state_value(key: &str) -> Option<Vec<u8>> {
+    match with_global(|state| Ok(state.store.get(key).map(|e| e.value.clone()))) {
+        Ok(val) => val,
+        Err(e) => {
+            tracing::warn!("get_state_value: {e}");
+            None
+        }
+    }
 }
 
 // ── MigrateSdk (Rust-native API) ─────────────────────────────────────────
@@ -251,28 +336,20 @@ impl MigrateSdk {
     ) -> Result<ConflictSet, MigrateError> {
         let local = self.app.export_state()?;
 
-        // ── schema version check ──
-        for (key, entry) in &mut remote.keys {
-            if let Some(reg) = self.registrations.get(key) {
-                match schema::check_schema_version(key, entry.schema_version, reg.schema_version)? {
-                    schema::SchemaAction::Current => {}
-                    schema::SchemaAction::Migrate { from_version, .. } => {
-                        let old = std::mem::take(&mut entry.value);
-                        let migrated =
-                            self.app
-                                .migrate_schema(key, from_version, old)
-                                .map_err(|e| {
-                                    MigrateError::CallbackFailed(format!(
-                                        "migrate_schema failed for '{key}': {e}"
-                                    ))
-                                })?;
-                        entry.value = migrated;
-                        entry.schema_version = reg.schema_version;
-                    }
-                    schema::SchemaAction::TooNew { .. } => unreachable!(),
-                }
-            }
-        }
+        // ── schema version check — drop keys that cannot be handled ──
+        let schema_dropped_keys = filter_schema_keys(
+            &mut remote,
+            &self.registrations,
+            &mut |key, from_version, old| {
+                self.app
+                    .migrate_schema(key, from_version, old)
+                    .map_err(|e| {
+                        MigrateError::CallbackFailed(format!(
+                            "migrate_schema failed for '{key}': {e}"
+                        ))
+                    })
+            },
+        );
 
         // ── resolve conflicts ──
         let (mut resolved_keys, mut conflict_set) = conflict::resolve_conflicts(&local, &remote)?;
@@ -317,6 +394,7 @@ impl MigrateSdk {
         };
 
         self.app.import_state(resolved)?;
+        conflict_set.schema_dropped_keys = schema_dropped_keys;
         Ok(conflict_set)
     }
 }
@@ -472,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn t5_schema_mismatch_errors() {
+    fn t5_schema_mismatch_drops_key() {
         let mut sdk = make_sdk();
         let remote = AppSnapshot {
             device_id: "remote".into(),
@@ -486,12 +564,9 @@ mod tests {
                 },
             )]),
         };
-        let result = sdk.import_snapshot(remote);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            MigrateError::SchemaMismatch { .. }
-        ));
+        let result = sdk.import_snapshot(remote).unwrap();
+        assert_eq!(result.schema_dropped_keys, vec!["k1"]);
+        assert!(result.conflicts.is_empty());
     }
 
     #[test]

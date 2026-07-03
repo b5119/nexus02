@@ -51,6 +51,7 @@ impl MigrateClient {
                     schema_version: 0,
                 })
                 .collect(),
+            ..Default::default()
         })
     }
 

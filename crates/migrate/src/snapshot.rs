@@ -22,7 +22,7 @@ pub struct AppSnapshot {
     pub keys: HashMap<String, StateEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ConflictEntry {
     pub key: String,
     pub local_value: Vec<u8>,
@@ -33,4 +33,5 @@ pub struct ConflictEntry {
 #[derive(Debug, Clone, Default)]
 pub struct ConflictSet {
     pub conflicts: Vec<ConflictEntry>,
+    pub schema_dropped_keys: Vec<String>,
 }
