@@ -26,13 +26,9 @@ impl PairingCode {
     pub fn generate(timeout_secs: u64) -> Self {
         let n: u32 = OsRng.gen_range(0..1_000_000);
         let code = format!("{n:06}");
-        tracing::info!(
-            "pairing code: {code}  (expires in {timeout_secs}s, one-time-use)"
-        );
+        tracing::info!("pairing code: {code}  (expires in {timeout_secs}s, one-time-use)");
         // Also print to stdout directly so it's clearly visible.
-        println!(
-            "🔑 Pairing code: {code}  (expires in {timeout_secs}s, one-time-use)"
-        );
+        println!("🔑 Pairing code: {code}  (expires in {timeout_secs}s, one-time-use)");
         Self {
             code,
             generated_at: SystemTime::now(),
@@ -91,8 +87,7 @@ impl PeersStore {
         let inner = if path.exists() {
             let raw = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading peers.json at {path:?}"))?;
-            serde_json::from_str(&raw)
-                .with_context(|| format!("parsing peers.json at {path:?}"))?
+            serde_json::from_str(&raw).with_context(|| format!("parsing peers.json at {path:?}"))?
         } else {
             PeersFile {
                 peers: HashMap::new(),
@@ -125,12 +120,7 @@ impl PeersStore {
         }
     }
 
-    pub fn add(
-        &self,
-        device_id: &DeviceId,
-        cert_pem: String,
-        display_name: String,
-    ) -> Result<()> {
+    pub fn add(&self, device_id: &DeviceId, cert_pem: String, display_name: String) -> Result<()> {
         let mut map = self.inner.lock().unwrap();
         map.peers.insert(
             device_id.to_string(),
@@ -148,11 +138,14 @@ impl PeersStore {
 
     pub fn list(&self) -> Vec<(String, PeerEntry)> {
         let map = self.inner.lock().unwrap();
-        let mut entries: Vec<_> = map.peers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut entries: Vec<_> = map
+            .peers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         entries.sort_by_key(|a| a.1.paired_at);
         entries
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -166,10 +159,8 @@ fn persist_json<T: serde::Serialize>(path: &std::path::Path, value: &T) -> Resul
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| anyhow::anyhow!("serialization error: {e}"))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json)
-        .with_context(|| format!("writing {tmp:?}"))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {tmp:?} -> {path:?}"))?;
+    std::fs::write(&tmp, &json).with_context(|| format!("writing {tmp:?}"))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("renaming {tmp:?} -> {path:?}"))?;
     Ok(())
 }
 
@@ -219,7 +210,11 @@ impl nexus_proto::pair::v1::pair_service_server::PairService for PairingServer {
 
         // Store the initiator's cert.
         self.store
-            .add(&initiator_id, inner.initiator_cert_pem, inner.initiator_display_name)
+            .add(
+                &initiator_id,
+                inner.initiator_cert_pem,
+                inner.initiator_display_name,
+            )
             .map_err(|e| Status::internal(format!("failed to persist peer: {e}")))?;
 
         tracing::info!(
@@ -258,14 +253,9 @@ impl nexus_proto::pair::v1::pair_service_server::PairService for PairingServer {
 // Pairing listener runner
 // ---------------------------------------------------------------------------
 
-pub async fn run_pairing_listener(
-    port: u16,
-    timeout_secs: u64,
-    display_name: &str,
-) -> Result<()> {
+pub async fn run_pairing_listener(port: u16, timeout_secs: u64, display_name: &str) -> Result<()> {
     let cfg = crate::config::AgentConfig::load_or_create()?;
-    let tls =
-        crate::config::load_or_create_tls_identity(&cfg.device_id)?;
+    let tls = crate::config::load_or_create_tls_identity(&cfg.device_id)?;
 
     let store = Arc::new(PeersStore::open()?);
     let code = Arc::new(PairingCode::generate(timeout_secs));
@@ -309,5 +299,3 @@ pub async fn run_pairing_listener(
 
     Ok(())
 }
-
-

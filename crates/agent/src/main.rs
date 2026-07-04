@@ -124,7 +124,10 @@ async fn main() -> Result<()> {
             println!("{:<40} {:<30} paired_at", "device_id", "display_name");
             println!("{} {} {}", "-".repeat(40), "-".repeat(30), "-".repeat(10));
             for (device_id, entry) in &peers {
-                println!("{device_id:<40} {:<30} {}", entry.display_name, entry.paired_at);
+                println!(
+                    "{device_id:<40} {:<30} {}",
+                    entry.display_name, entry.paired_at
+                );
             }
             Ok(())
         }

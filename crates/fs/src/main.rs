@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "nexus-mount", about = "Mount a remote nexus-agent host's files locally")]
+#[command(
+    name = "nexus-mount",
+    about = "Mount a remote nexus-agent host's files locally"
+)]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -106,8 +109,8 @@ async fn main() -> Result<()> {
                     .context("host not found in trusted-certs.json; pair with it first using `nexus-mount pair`")?;
                 (String::new(), entry.cert_pem)
             } else {
-                let token = token
-                    .context("--token is required (or use --trusted for a paired device)")?;
+                let token =
+                    token.context("--token is required (or use --trusted for a paired device)")?;
                 let ca_path = ca_cert
                     .context("--ca-cert is required (or use --trusted for a paired device)")?;
                 let ca_pem = std::fs::read_to_string(&ca_path)

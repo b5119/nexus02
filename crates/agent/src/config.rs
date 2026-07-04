@@ -118,9 +118,9 @@ pub fn load_or_create_tls_identity(device_id: &DeviceId) -> Result<TlsIdentity> 
             Ok(p) => p,
             Err(_) => return true,
         };
-        let found = params.subject_alt_names.iter().any(|san| {
-            matches!(san, rcgen::SanType::DnsName(name) if name.as_str() == device_id_str)
-        });
+        let found = params.subject_alt_names.iter().any(
+            |san| matches!(san, rcgen::SanType::DnsName(name) if name.as_str() == device_id_str),
+        );
         !found
     };
 

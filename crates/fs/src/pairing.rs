@@ -77,10 +77,8 @@ fn persist_json<T: serde::Serialize>(path: &std::path::Path, value: &T) -> Resul
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| anyhow::anyhow!("serialization error: {e}"))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json)
-        .with_context(|| format!("writing {tmp:?}"))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {tmp:?} -> {path:?}"))?;
+    std::fs::write(&tmp, &json).with_context(|| format!("writing {tmp:?}"))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("renaming {tmp:?} -> {path:?}"))?;
     Ok(())
 }
 
@@ -107,8 +105,7 @@ pub async fn pair_with_host(
         .connect()
         .await?;
 
-    let mut client =
-        nexus_proto::pair::v1::pair_service_client::PairServiceClient::new(channel);
+    let mut client = nexus_proto::pair::v1::pair_service_client::PairServiceClient::new(channel);
 
     let req = nexus_proto::pair::v1::PairRequest {
         code: code.to_string(),
