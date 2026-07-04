@@ -24,6 +24,8 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+subtle = "2"
+rand = { version = "0.8", features = ["getrandom"] }
 
 [profile.dev]
 # Lower debug info verbosity to ease RAM pressure during compilation

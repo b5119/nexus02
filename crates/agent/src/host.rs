@@ -945,6 +945,7 @@ pub async fn run(
     serve_dir: String,
     port: u16,
     auth_token: String,
+    device_id: nexus_common::DeviceId,
     gc_interval_hours: u64,
     tombstone_ttl_hours: u64,
     max_store_entries: usize,
@@ -983,7 +984,7 @@ pub async fn run(
     };
 
     // Load (or generate on first run) the self-signed TLS identity.
-    let tls = crate::config::load_or_create_tls_identity()?;
+    let tls = crate::config::load_or_create_tls_identity(&device_id)?;
     let identity = Identity::from_pem(&tls.cert_pem, &tls.key_pem);
 
     let expected = auth_token;

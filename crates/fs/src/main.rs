@@ -1,47 +1,65 @@
-//! nexus-mount: mounts a remote device's filesystem (served by a
-//! running nexus-agent host) onto a local directory via FUSE.
-//!
-//! This only builds on Linux/macOS — see Cargo.toml's target-gated
-//! fuser dependency. Android has no equivalent for a third-party
-//! FUSE client; that direction is handled by a custom in-app file
-//! browser instead, which is a separate, much simpler piece (no FUSE
-//! involved at all — just gRPC calls rendered into a list view).
-//!
-//! (The `clippy::result_large_err` allow for tonic's `Status` error type is
-//! scoped to `mod filesystem`, where that surface lives — not crate-wide.)
-
 mod config;
 mod filesystem;
 mod grpc_client;
+mod pairing;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "nexus-mount",
-    about = "Mount a remote nexus-agent host's files locally"
-)]
+#[command(name = "nexus-mount", about = "Mount a remote nexus-agent host's files locally")]
 struct Args {
-    /// Address of the remote agent to mount, e.g. https://192.168.1.50:50051
-    /// (must be https — the agent serves TLS). For milestone 1 this is typed
-    /// in manually; the control-plane registry replaces this once it exists.
-    #[arg(long)]
-    remote: String,
+    #[command(subcommand)]
+    command: Command,
+}
 
-    /// Local directory to mount onto. Must already exist and be empty.
-    #[arg(long)]
-    mountpoint: String,
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Mount a remote filesystem via FUSE
+    Mount {
+        /// Address of the remote agent, e.g. https://192.168.1.50:50051
+        #[arg(long)]
+        remote: String,
 
-    /// Shared-secret auth token, matching the agent's (found in its config dir,
-    /// agent.json). Falls back to the NEXUS_AUTH_TOKEN env var. See ADR 0004.
-    #[arg(long, env = "NEXUS_AUTH_TOKEN")]
-    token: String,
+        /// Local directory to mount onto. Must already exist and be empty.
+        #[arg(long)]
+        mountpoint: String,
 
-    /// Path to the agent's TLS certificate (cert.pem from its config dir), used
-    /// to verify the server. Falls back to the NEXUS_CA_CERT env var.
-    #[arg(long, env = "NEXUS_CA_CERT")]
-    ca_cert: String,
+        /// Shared-secret auth token. Falls back to NEXUS_AUTH_TOKEN env var.
+        /// Not needed if --trusted is used (paired device).
+        #[arg(long, env = "NEXUS_AUTH_TOKEN", required_unless_present = "trusted")]
+        token: Option<String>,
+
+        /// Path to the agent's TLS certificate. Falls back to NEXUS_CA_CERT env var.
+        /// Not needed if --trusted is used (the paired host's cert is in trusted-certs.json).
+        #[arg(long, env = "NEXUS_CA_CERT", required_unless_present = "trusted")]
+        ca_cert: Option<String>,
+
+        /// Use a previously paired host's certificate from trusted-certs.json
+        /// instead of providing --token and --ca-cert.
+        #[arg(long)]
+        trusted: bool,
+    },
+
+    /// Pair with a remote host using a 6-digit code (ADR 0013)
+    Pair {
+        /// Address of the host to pair with (IP or hostname, no port — uses 50052).
+        #[arg(long)]
+        host: String,
+
+        /// 6-digit pairing code displayed by the host.
+        #[arg(long)]
+        code: String,
+
+        /// Human-readable display name for this device (shown on the host).
+        #[arg(long, default_value = "")]
+        display_name: String,
+
+        /// Path to this device's identity certificate. Defaults to cert.pem
+        /// in the NEXUS_CONFIG_DIR.
+        #[arg(long)]
+        cert_path: Option<String>,
+    },
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -65,31 +83,104 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    tracing::info!(remote = %args.remote, mountpoint = %args.mountpoint, "mounting (TLS + token auth)");
+    match args.command {
+        Command::Mount {
+            remote,
+            mountpoint,
+            token,
+            ca_cert,
+            trusted,
+        } => {
+            let (token_val, ca_pem) = if trusted {
+                // Read the host's cert from trusted-certs.json by matching the remote host.
+                let store = pairing::TrustedCertsStore::open()?;
+                // Extract host device_id from the remote address — use an env var or
+                // a config. For now, require the user to set NEXUS_TRUSTED_HOST_ID.
+                let host_id = std::env::var("NEXUS_TRUSTED_HOST_ID")
+                    .context("NEXUS_TRUSTED_HOST_ID must be set when using --trusted")?;
+                let host_id_parsed: uuid::Uuid = host_id
+                    .parse()
+                    .context("NEXUS_TRUSTED_HOST_ID is not a valid UUID")?;
+                let entry = store
+                    .get(&nexus_common::DeviceId(host_id_parsed))
+                    .context("host not found in trusted-certs.json; pair with it first using `nexus-mount pair`")?;
+                (String::new(), entry.cert_pem)
+            } else {
+                let token = token
+                    .context("--token is required (or use --trusted for a paired device)")?;
+                let ca_path = ca_cert
+                    .context("--ca-cert is required (or use --trusted for a paired device)")?;
+                let ca_pem = std::fs::read_to_string(&ca_path)
+                    .with_context(|| format!("reading agent TLS cert at {ca_path}"))?;
+                (token, ca_pem)
+            };
 
-    let ca_pem = std::fs::read_to_string(&args.ca_cert)
-        .with_context(|| format!("reading agent TLS cert at {}", args.ca_cert))?;
+            let cfg = config::ClientConfig::load_or_create()?;
+            let clocks = nexus_common::ClockStore::open(config::clock_store_path()?)
+                .context("opening client clock store")?;
+            tracing::info!(device_id = %cfg.device_id, "client identity loaded");
 
-    // This client's own identity + per-file clock memory (for multi-writer
-    // conflict detection — ADR 0005/0006).
-    let cfg = config::ClientConfig::load_or_create()?;
-    let clocks = nexus_common::ClockStore::open(config::clock_store_path()?)
-        .context("opening client clock store")?;
-    tracing::info!(device_id = %cfg.device_id, "client identity loaded");
+            let client = grpc_client::RemoteFs::connect(remote.clone(), ca_pem, token_val).await?;
+            let fs = filesystem::NexusFuse::new(client, cfg.device_id.to_string(), clocks);
 
-    let client = grpc_client::RemoteFs::connect(args.remote, ca_pem, args.token).await?;
-    let fs = filesystem::NexusFuse::new(client, cfg.device_id.to_string(), clocks);
+            let mountpoint_clone = mountpoint.clone();
+            tokio::task::spawn_blocking(move || {
+                let options = vec![fuser::MountOption::FSName("nexus".into())];
+                fuser::mount2(fs, &mountpoint_clone, &options)
+            })
+            .await??;
 
-    // mount2 blocks the current thread until unmount; run it on a
-    // dedicated blocking thread so we don't tie up the tokio runtime
-    // that grpc_client needs for its async calls underneath.
-    let mountpoint = args.mountpoint.clone();
-    tokio::task::spawn_blocking(move || {
-        // Read-write mount (ADR 0006). Default is RW; we only set FSName.
-        let options = vec![fuser::MountOption::FSName("nexus".into())];
-        fuser::mount2(fs, &mountpoint, &options)
-    })
-    .await??;
+            Ok(())
+        }
 
-    Ok(())
+        Command::Pair {
+            host,
+            code,
+            display_name,
+            cert_path,
+        } => {
+            let cfg = config::ClientConfig::load_or_create()?;
+
+            // Determine the client's identity cert.
+            let cert_pem = if let Some(ref path) = cert_path {
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("reading cert from {path}"))?
+            } else {
+                let default_path = config::config_dir()?.join("cert.pem");
+                if default_path.exists() {
+                    std::fs::read_to_string(&default_path)
+                        .with_context(|| format!("reading cert from {}", default_path.display()))?
+                } else {
+                    anyhow::bail!(
+                        "no cert.pem found at {}; run `nexus-agent serve` once to generate one, \
+                         or provide --cert-path",
+                        default_path.display()
+                    );
+                }
+            };
+
+            let (host_id, host_cert_pem) = pairing::pair_with_host(
+                &host,
+                50052,
+                &code,
+                &cert_pem,
+                &cfg.device_id,
+                &display_name,
+            )
+            .await?;
+
+            // Store the host's cert in trusted-certs.json.
+            let store = pairing::TrustedCertsStore::open()?;
+            let host_device_id: uuid::Uuid = host_id.parse()?;
+            store.add(
+                &nexus_common::DeviceId(host_device_id),
+                host_cert_pem,
+                display_name,
+            )?;
+
+            println!("To mount, run: NEXUS_TRUSTED_HOST_ID={host_id} nexumount mount --remote https://{host}:50051 --mountpoint <dir> --trusted");
+
+            Ok(())
+        }
+    }
 }

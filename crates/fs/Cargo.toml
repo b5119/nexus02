@@ -18,6 +18,7 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
+uuid.workspace = true
 # Bounded inode<->path table (LRU eviction) so a long-running mount over a
 # large remote tree can't leak memory indefinitely.
 lru = "0.18"

@@ -1,53 +1,55 @@
-//! nexus-agent: the daemon that runs on every device in the mesh.
-//!
-//! Roles:
-//! - HOST: exposes this device's filesystem over gRPC (FileService).
-//!   Every device kind can be a host, including Android (within
-//!   scoped-storage limits — see fs::android_storage for details
-//!   once that module exists).
-//! - CLIENT: consumes a remote device's FileService and (on Linux/
-//!   macOS/Windows) mounts it via FUSE/WinFsp. Android cannot be a
-//!   FUSE client — see docs/adr/0001-android-fuse-limitation.md.
-//!
-//! For milestone 1, this binary only implements the HOST role.
-//! The CLIENT/mount side lives in the separate `nexus-fs` crate,
-//! which calls into a running agent over gRPC rather than embedding
-//! the serving logic itself.
-//!
-//! (The `clippy::result_large_err` allow for tonic's `Status` error type is
-//! scoped to `mod host`, where that surface lives — not crate-wide.)
-
 mod config;
 mod host;
+mod pairing;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "nexus-agent", about = "Nexus device mesh agent")]
 struct Args {
-    /// Directory this agent will serve when acting as a host.
-    /// On Android this should be a SAF-accessible path — plain
-    /// arbitrary paths outside the app sandbox will fail to read
-    /// on Android 10+ regardless of permissions granted.
-    #[arg(long, default_value = "/tmp/nexus-share")]
-    serve_dir: String,
+    #[command(subcommand)]
+    command: Command,
+}
 
-    /// Port to listen on for incoming gRPC connections from client agents.
-    #[arg(long, default_value_t = 50051)]
-    port: u16,
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run the data-plane server (filesystem serving, GC, etc.)
+    Serve {
+        /// Directory this agent will serve when acting as a host.
+        #[arg(long, default_value = "/tmp/nexus-share")]
+        serve_dir: String,
 
-    /// GC sweep interval in hours (ADR 0011).
-    #[arg(long, default_value_t = 6)]
-    gc_interval_hours: u64,
+        /// Port to listen on for incoming gRPC connections.
+        #[arg(long, default_value_t = 50051)]
+        port: u16,
 
-    /// Tombstone TTL in hours (ADR 0011).
-    #[arg(long, default_value_t = 24)]
-    tombstone_ttl_hours: u64,
+        /// GC sweep interval in hours (ADR 0011).
+        #[arg(long, default_value_t = 6)]
+        gc_interval_hours: u64,
 
-    /// Hard cap per store (number of entries) before GC eviction.
-    #[arg(long, default_value_t = 50_000)]
-    max_store_entries: usize,
+        /// Tombstone TTL in hours (ADR 0011).
+        #[arg(long, default_value_t = 24)]
+        tombstone_ttl_hours: u64,
+
+        /// Hard cap per store (number of entries) before GC eviction.
+        #[arg(long, default_value_t = 50_000)]
+        max_store_entries: usize,
+    },
+
+    /// Start the pairing listener (port 50052, code-based device pairing)
+    PairMode {
+        /// Seconds before the pairing code expires (default 60).
+        #[arg(long, default_value_t = 60)]
+        timeout_secs: u64,
+
+        /// Human-readable display name for this host (shown to the initiator).
+        #[arg(long, default_value = "")]
+        display_name: String,
+    },
+
+    /// List all paired devices from peers.json
+    ListPeers,
 }
 
 fn init_logging() {
@@ -74,26 +76,57 @@ async fn main() -> Result<()> {
     init_logging();
 
     let args = Args::parse();
-    let cfg = config::AgentConfig::load_or_create()?;
 
-    tracing::info!(
-        device_id = %cfg.device_id,
-        serve_dir = %args.serve_dir,
-        port = args.port,
-        "starting nexus-agent"
-    );
-    tracing::info!(
-        "auth token + TLS cert are stored in the config dir (see NEXUS_CONFIG_DIR / \
-         $HOME/.config/nexus/); the client needs both to connect"
-    );
+    match args.command {
+        Command::Serve {
+            serve_dir,
+            port,
+            gc_interval_hours,
+            tombstone_ttl_hours,
+            max_store_entries,
+        } => {
+            let cfg = config::AgentConfig::load_or_create()?;
 
-    host::run(
-        args.serve_dir,
-        args.port,
-        cfg.auth_token,
-        args.gc_interval_hours,
-        args.tombstone_ttl_hours,
-        args.max_store_entries,
-    )
-    .await
+            tracing::info!(
+                device_id = %cfg.device_id,
+                %serve_dir,
+                port,
+                "starting nexus-agent serve"
+            );
+
+            host::run(
+                serve_dir,
+                port,
+                cfg.auth_token,
+                cfg.device_id,
+                gc_interval_hours,
+                tombstone_ttl_hours,
+                max_store_entries,
+            )
+            .await
+        }
+
+        Command::PairMode {
+            timeout_secs,
+            display_name,
+        } => {
+            tracing::info!(timeout_secs, "starting pair-mode listener");
+            pairing::run_pairing_listener(50052, timeout_secs, &display_name).await
+        }
+
+        Command::ListPeers => {
+            let store = pairing::PeersStore::open()?;
+            let peers = store.list();
+            if peers.is_empty() {
+                println!("No paired devices.");
+                return Ok(());
+            }
+            println!("{:<40} {:<30} paired_at", "device_id", "display_name");
+            println!("{} {} {}", "-".repeat(40), "-".repeat(30), "-".repeat(10));
+            for (device_id, entry) in &peers {
+                println!("{device_id:<40} {:<30} {}", entry.display_name, entry.paired_at);
+            }
+            Ok(())
+        }
+    }
 }
