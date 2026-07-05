@@ -1074,9 +1074,13 @@ pub async fn run(
     tracing::info!(cert = %tls.cert_path.display(), "TLS enabled (self-signed); clients must trust this cert");
     tracing::info!(%addr, "FileService listening (TLS + mTLS cert auth + token fallback)");
 
-    let router = Server::builder()
-        .tls_config(tls_config)?
-        .add_service(FileServiceServer::with_interceptor(service, interceptor.clone()));
+    let router =
+        Server::builder()
+            .tls_config(tls_config)?
+            .add_service(FileServiceServer::with_interceptor(
+                service,
+                interceptor.clone(),
+            ));
 
     let router = if enable_streaming {
         let capture = nexus_stream::capture::X11Capture::new(fps as f64)?;
@@ -1084,13 +1088,15 @@ pub async fn run(
         let encoder = nexus_stream::encode::Encoder::new(width, height)?;
         let injector = nexus_stream::inject::Injector::new()?;
 
-        let stream_host =
-            nexus_stream::host::run_stream_host(capture, encoder, injector).await?;
+        let stream_host = nexus_stream::host::run_stream_host(capture, encoder, injector).await?;
         let stream_svc = nexus_stream::host::StreamHostService::new(Arc::new(stream_host));
 
         tracing::info!(width, height, fps, quality, "screen streaming enabled");
 
-        router.add_service(StreamServiceServer::with_interceptor(stream_svc, interceptor))
+        router.add_service(StreamServiceServer::with_interceptor(
+            stream_svc,
+            interceptor,
+        ))
     } else {
         router
     };

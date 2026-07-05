@@ -1,7 +1,5 @@
 use anyhow::Result;
-use nexus_proto::stream::v1::{
-    InputEvent, InputEventType, MouseButton, InputAction,
-};
+use nexus_proto::stream::v1::{InputAction, InputEvent, InputEventType, MouseButton};
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 
@@ -17,13 +15,15 @@ pub struct Injector {
 #[cfg(target_os = "linux")]
 impl std::fmt::Debug for Injector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Injector").field("fd", &self.fd.as_raw_fd()).finish()
+        f.debug_struct("Injector")
+            .field("fd", &self.fd.as_raw_fd())
+            .finish()
     }
 }
 
 #[cfg(target_os = "linux")]
 mod sys {
-    use std::os::raw::{c_int, c_ushort, c_uint};
+    use std::os::raw::{c_int, c_uint, c_ushort};
 
     pub const UI_DEV_CREATE: c_uint = 0x5501u32;
     #[allow(dead_code)]
@@ -181,54 +181,50 @@ impl Injector {
                 self.sync()?;
             }
 
-            t if t == InputEventType::Mouse as i32 => {
-                match event.action {
-                    a if a == InputAction::Move as i32 => {
-                        self.write_ev(sys::EV_REL, sys::REL_X, event.x as i32)?;
-                        self.write_ev(sys::EV_REL, sys::REL_Y, event.y as i32)?;
-                        self.sync()?;
-                    }
-                    a if a == InputAction::Press as i32 => {
-                        let btn = match event.button {
-                            b if b == MouseButton::Left as i32 => sys::BTN_LEFT,
-                            b if b == MouseButton::Right as i32 => sys::BTN_RIGHT,
-                            b if b == MouseButton::Middle as i32 => sys::BTN_MIDDLE,
-                            _ => return Ok(()),
-                        };
-                        self.write_ev(sys::EV_KEY, btn, 1)?;
-                        self.sync()?;
-                    }
-                    a if a == InputAction::Release as i32 => {
-                        let btn = match event.button {
-                            b if b == MouseButton::Left as i32 => sys::BTN_LEFT,
-                            b if b == MouseButton::Right as i32 => sys::BTN_RIGHT,
-                            b if b == MouseButton::Middle as i32 => sys::BTN_MIDDLE,
-                            _ => return Ok(()),
-                        };
-                        self.write_ev(sys::EV_KEY, btn, 0)?;
-                        self.sync()?;
-                    }
-                    _ => {}
+            t if t == InputEventType::Mouse as i32 => match event.action {
+                a if a == InputAction::Move as i32 => {
+                    self.write_ev(sys::EV_REL, sys::REL_X, event.x as i32)?;
+                    self.write_ev(sys::EV_REL, sys::REL_Y, event.y as i32)?;
+                    self.sync()?;
                 }
-            }
+                a if a == InputAction::Press as i32 => {
+                    let btn = match event.button {
+                        b if b == MouseButton::Left as i32 => sys::BTN_LEFT,
+                        b if b == MouseButton::Right as i32 => sys::BTN_RIGHT,
+                        b if b == MouseButton::Middle as i32 => sys::BTN_MIDDLE,
+                        _ => return Ok(()),
+                    };
+                    self.write_ev(sys::EV_KEY, btn, 1)?;
+                    self.sync()?;
+                }
+                a if a == InputAction::Release as i32 => {
+                    let btn = match event.button {
+                        b if b == MouseButton::Left as i32 => sys::BTN_LEFT,
+                        b if b == MouseButton::Right as i32 => sys::BTN_RIGHT,
+                        b if b == MouseButton::Middle as i32 => sys::BTN_MIDDLE,
+                        _ => return Ok(()),
+                    };
+                    self.write_ev(sys::EV_KEY, btn, 0)?;
+                    self.sync()?;
+                }
+                _ => {}
+            },
 
-            t if t == InputEventType::Touch as i32 => {
-                match event.action {
-                    a if a == InputAction::Press as i32 || a == InputAction::Move as i32 => {
-                        self.write_ev(sys::EV_ABS, sys::ABS_X, event.x as i32)?;
-                        self.write_ev(sys::EV_ABS, sys::ABS_Y, event.y as i32)?;
-                        if event.action == InputAction::Press as i32 {
-                            self.write_ev(sys::EV_KEY, sys::BTN_TOUCH, 1)?;
-                        }
-                        self.sync()?;
+            t if t == InputEventType::Touch as i32 => match event.action {
+                a if a == InputAction::Press as i32 || a == InputAction::Move as i32 => {
+                    self.write_ev(sys::EV_ABS, sys::ABS_X, event.x as i32)?;
+                    self.write_ev(sys::EV_ABS, sys::ABS_Y, event.y as i32)?;
+                    if event.action == InputAction::Press as i32 {
+                        self.write_ev(sys::EV_KEY, sys::BTN_TOUCH, 1)?;
                     }
-                    a if a == InputAction::Release as i32 => {
-                        self.write_ev(sys::EV_KEY, sys::BTN_TOUCH, 0)?;
-                        self.sync()?;
-                    }
-                    _ => {}
+                    self.sync()?;
                 }
-            }
+                a if a == InputAction::Release as i32 => {
+                    self.write_ev(sys::EV_KEY, sys::BTN_TOUCH, 0)?;
+                    self.sync()?;
+                }
+                _ => {}
+            },
 
             _ => {}
         }
@@ -253,13 +249,8 @@ impl Injector {
             )
         };
         let raw_fd = self.fd.as_raw_fd();
-        let written = unsafe {
-            libc::write(
-                raw_fd,
-                bytes.as_ptr() as *const libc::c_void,
-                bytes.len(),
-            )
-        };
+        let written =
+            unsafe { libc::write(raw_fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
         if written < 0 {
             anyhow::bail!("uinput write failed: {}", std::io::Error::last_os_error());
         }

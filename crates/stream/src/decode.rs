@@ -35,8 +35,8 @@ unsafe impl Send for FfmpegDecoder {}
 #[cfg(feature = "ffmpeg")]
 impl FfmpegDecoder {
     fn new(width: u32, height: u32) -> Result<Self> {
-        use ffmpeg_next as ffmpeg;
         use ffmpeg::{codec, decoder};
+        use ffmpeg_next as ffmpeg;
 
         let codec = decoder::find_by_name("h264")
             .ok_or_else(|| anyhow::anyhow!("H.264 decoder not found"))?;
@@ -55,8 +55,8 @@ impl FfmpegDecoder {
     }
 
     fn decode(&mut self, frame: &EncodedFrame) -> Result<DecodedFrame> {
-        use ffmpeg_next as ffmpeg;
         use ffmpeg::{error, packet, Error};
+        use ffmpeg_next as ffmpeg;
 
         let mut pkt = packet::Packet::copy(&frame.data);
         if frame.keyframe {
@@ -81,11 +81,8 @@ impl FfmpegDecoder {
                     .expect("failed to create scaler")
                 });
 
-                let mut bgra = ffmpeg::frame::Video::new(
-                    ffmpeg::format::Pixel::BGRA,
-                    self.width,
-                    self.height,
-                );
+                let mut bgra =
+                    ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, self.width, self.height);
                 scaler.run(&decoded, &mut bgra)?;
 
                 let size = (self.width * self.height * 4) as usize;
@@ -100,7 +97,9 @@ impl FfmpegDecoder {
                     height: self.height,
                 })
             }
-            Err(Error::Other { errno: error::EAGAIN }) => {
+            Err(Error::Other {
+                errno: error::EAGAIN,
+            }) => {
                 let size = (self.width * self.height * 4) as usize;
                 Ok(DecodedFrame {
                     data: vec![0u8; size],

@@ -47,8 +47,8 @@ unsafe impl Send for FfmpegEncoder {}
 #[cfg(feature = "ffmpeg")]
 impl FfmpegEncoder {
     fn new(width: u32, height: u32, codec_name: &str) -> Result<Self> {
-        use ffmpeg_next as ffmpeg;
         use ffmpeg::{codec, encoder, format, Dictionary};
+        use ffmpeg_next as ffmpeg;
 
         let (scaled_w, scaled_h) = scale_dimensions(width, height);
 
@@ -87,8 +87,8 @@ impl FfmpegEncoder {
     }
 
     fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame> {
-        use ffmpeg_next as ffmpeg;
         use ffmpeg::{error, frame, packet, Error};
+        use ffmpeg_next as ffmpeg;
 
         let mut src = frame::Video::new(ffmpeg::format::Pixel::BGRA, frame.width, frame.height);
         let dst = src.data_mut(0);
@@ -97,11 +97,8 @@ impl FfmpegEncoder {
         src.set_pts(Some(self.pts));
         self.pts += 1;
 
-        let mut yuv = frame::Video::new(
-            ffmpeg::format::Pixel::YUV420P,
-            self.scaled_w,
-            self.scaled_h,
-        );
+        let mut yuv =
+            frame::Video::new(ffmpeg::format::Pixel::YUV420P, self.scaled_w, self.scaled_h);
         self.scaler.run(&src, &mut yuv)?;
 
         self.ctx.send_frame(&yuv)?;
@@ -109,7 +106,9 @@ impl FfmpegEncoder {
         let mut pkt = packet::Packet::empty();
         let data = match self.ctx.receive_packet(&mut pkt) {
             Ok(()) => pkt.data().unwrap_or(&[]).to_vec(),
-            Err(Error::Other { errno: error::EAGAIN }) => vec![],
+            Err(Error::Other {
+                errno: error::EAGAIN,
+            }) => vec![],
             Err(e) => anyhow::bail!("encode receive_packet: {e}"),
         };
 

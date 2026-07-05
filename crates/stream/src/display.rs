@@ -1,11 +1,9 @@
 use anyhow::Result;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 
-use nexus_proto::stream::v1::{
-    InputEvent, InputEventType, MouseButton, InputAction,
-};
+use nexus_proto::stream::v1::{InputAction, InputEvent, InputEventType, MouseButton};
 
 use crate::decode::DecodedFrame;
 
@@ -67,8 +65,7 @@ impl ViewerDisplay {
                     let window = Arc::new(window);
 
                     let size = window.inner_size();
-                    let surface_texture =
-                        SurfaceTexture::new(size.width, size.height, &*window);
+                    let surface_texture = SurfaceTexture::new(size.width, size.height, &*window);
                     let px = Pixels::new(self.host_width, self.host_height, surface_texture)
                         .expect("failed to create pixels");
 
@@ -100,10 +97,7 @@ impl ViewerDisplay {
                                 }
                             }
                         }
-                        WindowEvent::KeyboardInput {
-                            event: kev,
-                            ..
-                        } => {
+                        WindowEvent::KeyboardInput { event: kev, .. } => {
                             let key_code = match kev.physical_key {
                                 winit::keyboard::PhysicalKey::Code(c) => c as u32,
                                 _ => 0,
@@ -122,9 +116,7 @@ impl ViewerDisplay {
                             };
                             self.input_tx.send(ev).ok();
                         }
-                        WindowEvent::CursorMoved {
-                            position, ..
-                        } => {
+                        WindowEvent::CursorMoved { position, .. } => {
                             let ev = InputEvent {
                                 event_type: InputEventType::Mouse as i32,
                                 key_code: 0,
@@ -135,9 +127,7 @@ impl ViewerDisplay {
                             };
                             self.input_tx.send(ev).ok();
                         }
-                        WindowEvent::MouseInput {
-                            state, button, ..
-                        } => {
+                        WindowEvent::MouseInput { state, button, .. } => {
                             let btn = match button {
                                 winit::event::MouseButton::Left => MouseButton::Left as i32,
                                 winit::event::MouseButton::Right => MouseButton::Right as i32,

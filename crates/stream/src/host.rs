@@ -4,10 +4,7 @@ use anyhow::Result;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
-use nexus_proto::stream::v1::{
-    InputEvent, VideoFrame,
-    stream_service_server::StreamService,
-};
+use nexus_proto::stream::v1::{stream_service_server::StreamService, InputEvent, VideoFrame};
 
 use crate::capture::X11Capture;
 use crate::encode::Encoder;
@@ -34,8 +31,7 @@ impl StreamHostService {
 
 #[tonic::async_trait]
 impl StreamService for StreamHostService {
-    type RemoteControlStream =
-        tokio_stream::wrappers::ReceiverStream<Result<VideoFrame, Status>>;
+    type RemoteControlStream = tokio_stream::wrappers::ReceiverStream<Result<VideoFrame, Status>>;
 
     async fn remote_control(
         &self,
@@ -73,8 +69,7 @@ impl StreamService for StreamHostService {
             let mut encoder = encoder.lock().await;
             let mut capture = capture.lock().await;
             let fps = capture.fps();
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs_f64(1.0 / fps));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs_f64(1.0 / fps));
 
             loop {
                 interval.tick().await;
@@ -117,7 +112,9 @@ impl StreamService for StreamHostService {
             }
         });
 
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 }
 
@@ -142,5 +139,3 @@ pub async fn run_stream_host(
         injector: Arc::new(Mutex::new(injector)),
     })
 }
-
-

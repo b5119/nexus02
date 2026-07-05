@@ -4,9 +4,7 @@ use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tonic::Request;
 
-use nexus_proto::stream::v1::{
-    stream_service_client::StreamServiceClient, InputEvent,
-};
+use nexus_proto::stream::v1::{stream_service_client::StreamServiceClient, InputEvent};
 
 use crate::decode::Decoder;
 use crate::display::ViewerDisplay;
@@ -24,7 +22,7 @@ impl StreamViewer {
     pub async fn connect(
         addr: &str,
         host_device_id: &str,
-    token: Option<&str>,
+        token: Option<&str>,
         trusted_ca_pem: Option<&str>,
     ) -> Result<Self> {
         let channel = connect_channel(addr, token, trusted_ca_pem).await?;

@@ -22,8 +22,8 @@ fn load_trusted_cert(device_id: &str) -> Result<Option<String>> {
     }
     let raw = std::fs::read_to_string(&store_path)
         .with_context(|| format!("reading {}", store_path.display()))?;
-    let store: HashMap<String, serde_json::Value> = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {}", store_path.display()))?;
+    let store: HashMap<String, serde_json::Value> =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", store_path.display()))?;
     if let Some(entry) = store.get(device_id) {
         if let Some(cert) = entry.get("cert_pem").and_then(|c| c.as_str()) {
             return Ok(Some(cert.to_string()));

@@ -44,12 +44,7 @@ impl X11Capture {
         let width = root_attrs.width as u32;
         let height = root_attrs.height as u32;
 
-        tracing::info!(
-            "X11 capture: {}x{} @ {:.0} FPS",
-            width,
-            height,
-            fps
-        );
+        tracing::info!("X11 capture: {}x{} @ {:.0} FPS", width, height, fps);
 
         Ok(Self {
             display,
