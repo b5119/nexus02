@@ -170,7 +170,11 @@ impl PeersStore {
     /// the given device ID.  Parses the stored PEM to DER and compares bytes,
     /// preventing a device-ID-only check from accepting a different cert that
     /// happens to carry the same UUID in its DNS SAN.
-    pub fn verify_cert_der(&self, device_id: &DeviceId, presented_der: &CertificateDer<'_>) -> bool {
+    pub fn verify_cert_der(
+        &self,
+        device_id: &DeviceId,
+        presented_der: &CertificateDer<'_>,
+    ) -> bool {
         let map = self.inner.lock().unwrap();
         match map.peers.get(&device_id.to_string()) {
             Some(entry) => {

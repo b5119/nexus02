@@ -1940,7 +1940,9 @@ mod tests {
                     if let Some(cert_der) = certs.first() {
                         let device_id = extract_device_id_from_cert(cert_der);
                         match device_id {
-                            Some(ref did) if peers.verify_cert_der(did, cert_der) => return Ok(req),
+                            Some(ref did) if peers.verify_cert_der(did, cert_der) => {
+                                return Ok(req)
+                            }
                             _ => {
                                 return Err(Status::unauthenticated(
                                     "client certificate not trusted",
@@ -1959,14 +1961,17 @@ mod tests {
         // Bind a TCP listener before spawning the server so the port is
         // reserved atomically — eliminates the TOCTOU race between probing
         // for a free port and the server binding it.
-        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("binding test listener");
+        let std_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("binding test listener");
         std_listener
             .set_nonblocking(true)
             .expect("setting non-blocking");
-        let port = std_listener.local_addr().expect("getting local addr").port();
-        let tokio_listener = tokio::net::TcpListener::from_std(std_listener)
-            .expect("converting to tokio listener");
+        let port = std_listener
+            .local_addr()
+            .expect("getting local addr")
+            .port();
+        let tokio_listener =
+            tokio::net::TcpListener::from_std(std_listener).expect("converting to tokio listener");
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(tokio_listener);
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
