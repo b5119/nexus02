@@ -25,10 +25,6 @@ pub struct PairingCode {
 }
 
 impl PairingCode {
-    pub fn generate(timeout_secs: u64) -> Self {
-        Self::with_max_attempts(timeout_secs, 5)
-    }
-
     pub fn with_max_attempts(timeout_secs: u64, max_attempts: u32) -> Self {
         let n: u32 = OsRng.gen_range(0..1_000_000);
         let code = format!("{n:06}");
