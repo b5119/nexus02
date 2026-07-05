@@ -9,3 +9,9 @@ pub mod migrate {
         tonic::include_proto!("nexus.migrate.v1");
     }
 }
+
+pub mod pair {
+    pub mod v1 {
+        tonic::include_proto!("nexus.pair.v1");
+    }
+}

@@ -94,12 +94,37 @@ pub struct TlsIdentity {
     pub cert_path: PathBuf,
 }
 
-pub fn load_or_create_tls_identity() -> Result<TlsIdentity> {
+pub fn load_or_create_tls_identity(device_id: &DeviceId) -> Result<TlsIdentity> {
     let dir = config_dir()?;
     let cert_path = dir.join("cert.pem");
     let key_path = dir.join("key.pem");
+    let device_id_str = device_id.to_string();
 
-    if cert_path.exists() && key_path.exists() {
+    // Check if existing cert has the DeviceId embedded as a SAN.
+    // If not — the cert was generated before ADR 0013 and is missing the
+    // identity SAN that the mTLS interceptor needs to extract the peer's
+    // device_id from incoming connections. Regenerate it with the SAN.
+    let needs_regen = || {
+        let cert_pem = match std::fs::read_to_string(&cert_path) {
+            Ok(s) => s,
+            Err(_) => return true,
+        };
+        let key_ok = key_path.exists();
+        if !key_ok {
+            return true;
+        }
+        // Parse the existing self-signed cert and check for the DeviceId SAN.
+        let params = match rcgen::CertificateParams::from_ca_cert_pem(&cert_pem) {
+            Ok(p) => p,
+            Err(_) => return true,
+        };
+        let found = params.subject_alt_names.iter().any(
+            |san| matches!(san, rcgen::SanType::DnsName(name) if name.as_str() == device_id_str),
+        );
+        !found
+    };
+
+    if cert_path.exists() && key_path.exists() && !needs_regen() {
         let cert_pem = std::fs::read_to_string(&cert_path)
             .with_context(|| format!("reading TLS cert at {cert_path:?}"))?;
         let key_pem = std::fs::read_to_string(&key_path)
@@ -111,19 +136,39 @@ pub fn load_or_create_tls_identity() -> Result<TlsIdentity> {
         });
     }
 
+    if cert_path.exists() {
+        tracing::info!(
+            "existing cert.pem is missing DeviceId SAN (pre-ADR-0013); regenerating with device_id {}",
+            device_id_str
+        );
+    }
+
     // Generate a fresh self-signed cert valid for localhost / 127.0.0.1.
+    // The DeviceId SAN is required for the mTLS interceptor to extract the
+    // peer's identity from incoming connections (see ADR 0013 §6).
     // LAN-trust only — see ADR 0004 for what this does and does not cover.
-    let san = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+    let san = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        device_id_str.clone(),
+    ];
     let rcgen::CertifiedKey { cert, key_pair } = rcgen::generate_simple_self_signed(san)
         .context("generating self-signed TLS certificate")?;
     let cert_pem = cert.pem();
     let key_pem = key_pair.serialize_pem();
 
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(&cert_path, &cert_pem)
-        .with_context(|| format!("writing TLS cert to {cert_path:?}"))?;
-    std::fs::write(&key_path, &key_pem)
-        .with_context(|| format!("writing TLS key to {key_path:?}"))?;
+    // Write cert+key atomically: write to temp files, then rename.
+    // This prevents a partial write from leaving the config dir in an
+    // inconsistent state if the process is killed mid-write.
+    let cert_tmp = dir.join("cert.pem.tmp");
+    let key_tmp = dir.join("key.pem.tmp");
+    std::fs::write(&cert_tmp, &cert_pem)
+        .with_context(|| format!("writing TLS cert to {cert_tmp:?}"))?;
+    std::fs::write(&key_tmp, &key_pem)
+        .with_context(|| format!("writing TLS key to {key_tmp:?}"))?;
+    std::fs::rename(&cert_tmp, &cert_path)?;
+    std::fs::rename(&key_tmp, &key_path)?;
 
     Ok(TlsIdentity {
         cert_pem,

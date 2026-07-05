@@ -1,0 +1,43 @@
+syntax = "proto3";
+package nexus.pair.v1;
+
+// PairService is the ephemeral pairing listener (port 50052, active only
+// during --pair-mode). It accepts one code-authenticated PairRequest and
+// exchanges identity certificates so the initiator can then connect to
+// the data-plane (port 50051) using mTLS instead of a shared-secret token.
+// See ADR 0013.
+service PairService {
+  // Initiator connects to host:50052, sends the 6-digit code + its own
+  // cert. Host validates the code and responds with its own cert if
+  // accepted. Both sides persist the received cert.
+  rpc RequestPair(PairRequest) returns (PairResponse);
+
+  // Query the host's peers.json for debugging / UI display.
+  rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
+}
+
+message PairRequest {
+  string code = 1;                      // 6-digit code displayed by host
+  string initiator_device_id = 2;        // UUID of the initiating device
+  string initiator_cert_pem = 3;         // PEM of the initiator's identity cert
+  string initiator_display_name = 4;     // Human-readable name (e.g. "Frank's Phone")
+}
+
+message PairResponse {
+  bool accepted = 1;
+  string host_cert_pem = 2;              // PEM of host's identity cert
+  string host_device_id = 3;             // UUID of the host device
+  string error_message = 4;              // populated when accepted == false
+}
+
+message ListPeersRequest {}
+
+message PeerInfo {
+  string device_id = 1;
+  string display_name = 2;
+  int64 paired_at = 3;
+}
+
+message ListPeersResponse {
+  repeated PeerInfo peers = 1;
+}
