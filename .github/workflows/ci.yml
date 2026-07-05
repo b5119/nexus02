@@ -27,13 +27,15 @@ jobs:
         with:
           persist-credentials: false
 
-      # protoc is required by tonic-build (prost no longer vendors it) and
-      # libfuse3-dev is required for the nexus-fs crate to link against FUSE.
+      # protoc is required by tonic-build (prost no longer vendors it);
+      # libfuse3-dev for nexus-fs (FUSE);
+      # libx11-dev, libxrandr-dev, libxcursor-dev, libxi-dev for nexus-stream (winit X11 backend).
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            protobuf-compiler libfuse3-dev pkg-config
+            protobuf-compiler libfuse3-dev pkg-config \
+            libx11-dev libxrandr-dev libxcursor-dev libxi-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -60,7 +62,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            protobuf-compiler libfuse3-dev pkg-config
+            protobuf-compiler libfuse3-dev pkg-config \
+            libx11-dev libxrandr-dev libxcursor-dev libxi-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
