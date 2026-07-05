@@ -3,10 +3,25 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::transport::Channel;
 use tonic::Request;
 
 use nexus_common::DeviceId;
+
+/// Extract a DeviceId from a PEM-encoded X.509 certificate's DNS SAN.
+/// Returns `None` if the cert has no DNS SAN that looks like a UUID.
+pub fn extract_device_id_from_cert_pem(cert_pem: &str) -> Result<DeviceId> {
+    let params =
+        rcgen::CertificateParams::from_ca_cert_pem(cert_pem).context("parsing certificate PEM")?;
+    for san in &params.subject_alt_names {
+        if let rcgen::SanType::DnsName(name) = san {
+            if let Ok(u) = uuid::Uuid::try_parse(name.as_str()) {
+                return Ok(DeviceId(u));
+            }
+        }
+    }
+    anyhow::bail!("no DeviceId (UUID) found in certificate's DNS SANs");
+}
 
 // ---------------------------------------------------------------------------
 // TrustedCertsStore — initiator-side (trusted-certs.json)
@@ -86,6 +101,16 @@ fn persist_json<T: serde::Serialize>(path: &std::path::Path, value: &T) -> Resul
 // Pairing client
 // ---------------------------------------------------------------------------
 
+/// Pair with a remote host using ADR 0013's 6-digit code exchange.
+///
+/// Connects to the host's pairing listener (port 50052), presents the
+/// 6-digit code and this device's identity cert, and receives the host's
+/// cert in return so future mounts can use mTLS via `--trusted`.
+///
+/// `ca_cert_pem` is optional: when provided it is used as the trusted CA
+/// for the TLS connection to the host.  When `None` the host's self-signed
+/// cert must be trusted by the system root store (unlikely for LAN use —
+/// pass `--ca-cert` pointing at the host's `cert.pem`).
 pub async fn pair_with_host(
     host: &str,
     port: u16,
@@ -93,11 +118,19 @@ pub async fn pair_with_host(
     cert_pem: &str,
     initiator_device_id: &DeviceId,
     display_name: &str,
+    ca_cert_pem: Option<&str>,
 ) -> Result<(String, String)> {
     let addr = format!("https://{host}:{port}");
     let uri: tonic::transport::Uri = addr.parse()?;
 
-    let tls = ClientTlsConfig::new().with_enabled_roots();
+    let tls = match ca_cert_pem {
+        Some(pem) => tonic::transport::ClientTlsConfig::new()
+            .ca_certificate(tonic::transport::Certificate::from_pem(pem))
+            .domain_name("localhost"),
+        None => tonic::transport::ClientTlsConfig::new()
+            .with_enabled_roots()
+            .domain_name("localhost"),
+    };
 
     let channel = Channel::builder(uri)
         .tls_config(tls)

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -6,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use rand::rngs::OsRng;
 use rand::Rng;
+use rustls_pki_types::CertificateDer;
 use subtle::ConstantTimeEq;
 use tonic::{transport::Server, Request, Response, Status};
 
@@ -95,6 +97,37 @@ pub struct PeersStore {
 }
 
 impl PeersStore {
+    /// Create an empty store that won't persist (for fallback when
+    /// peers.json is unavailable).
+    pub fn empty() -> Self {
+        Self {
+            path: PathBuf::new(),
+            inner: Mutex::new(PeersFile {
+                peers: HashMap::new(),
+            }),
+        }
+    }
+
+    /// Open a PeersStore backed by `dir/peers.json`.
+    /// Useful for testing or non-default config locations.
+    #[allow(dead_code)]
+    pub fn open_in(dir: &std::path::Path) -> Result<Self> {
+        let path = dir.join("peers.json");
+        let inner = if path.exists() {
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading peers.json at {path:?}"))?;
+            serde_json::from_str(&raw).with_context(|| format!("parsing peers.json at {path:?}"))?
+        } else {
+            PeersFile {
+                peers: HashMap::new(),
+            }
+        };
+        Ok(Self {
+            path,
+            inner: Mutex::new(inner),
+        })
+    }
+
     pub fn open() -> Result<Self> {
         let path = crate::config::config_dir()?.join("peers.json");
         let inner = if path.exists() {
@@ -129,6 +162,29 @@ impl PeersStore {
         let map = self.inner.lock().unwrap();
         match map.peers.get(&device_id.to_string()) {
             Some(entry) => entry.cert_pem == cert_pem,
+            None => false,
+        }
+    }
+
+    /// Verify a DER-encoded client certificate against the stored PEM for
+    /// the given device ID.  Parses the stored PEM to DER and compares bytes,
+    /// preventing a device-ID-only check from accepting a different cert that
+    /// happens to carry the same UUID in its DNS SAN.
+    pub fn verify_cert_der(
+        &self,
+        device_id: &DeviceId,
+        presented_der: &CertificateDer<'_>,
+    ) -> bool {
+        let map = self.inner.lock().unwrap();
+        match map.peers.get(&device_id.to_string()) {
+            Some(entry) => {
+                let mut reader = BufReader::new(entry.cert_pem.as_bytes());
+                let mut iter = rustls_pemfile::certs(&mut reader);
+                match iter.next() {
+                    Some(Ok(stored_der)) => stored_der.as_ref() == presented_der.as_ref(),
+                    _ => false,
+                }
+            }
             None => false,
         }
     }

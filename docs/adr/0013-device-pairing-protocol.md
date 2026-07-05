@@ -300,6 +300,14 @@ nexus-mount mount --remote <address> --mountpoint <dir>
   self-signed certificate (as CN or SAN) so the interceptor can extract it from
   incoming mTLS connections to look up the peer in `peers.json`.
 - New dependencies: `subtle` (constant-time comparison), `rand` (OsRng for code generation).
+### 7. Static Peer CA Trust Store
+
+**Decision:** The peer CA trust store (built from `peers.json` at agent startup) is static for the lifetime of the agent process. Devices paired after the agent starts must wait for an agent restart before their certificate-based authentication works via the `client_ca_root()` path. Token-based auth (ADR 0004) works immediately after pairing without restart.
+
+**Known limitation:** The `ServerTlsConfig::client_ca_root()` API in tonic 0.12.x (and 0.14.x) accepts a static `Certificate` bundle. There is no public API to hot-reload the trust anchor store without rebuilding the TLS acceptor. A future enhancement should implement dynamic reload by wrapping the TLS acceptor with a custom `Connected` implementation that can be updated at runtime.
+
+**Issue:** Support dynamic peer CA store reload without agent restart — tracked in GitHub issue #TBD.
+
 ## Consequences
 
 - Pairing replaces the manual two-step setup (token + cert-pull) with a single code-typing interaction for most users.

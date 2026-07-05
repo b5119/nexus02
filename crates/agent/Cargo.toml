@@ -21,11 +21,15 @@ serde_json.workspace = true
 uuid.workspace = true
 clap = { version = "4", features = ["derive"] }
 async-stream = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["net"] }
 # Self-signed TLS cert generation. Pinned to the `ring` backend (default for
 # 0.13) so we reuse the same crypto provider tonic's TLS already links, and
 # avoid pulling aws-lc-rs (which needs cmake + a C build on every machine/CI).
 rcgen = { version = "0.13", features = ["x509-parser"] }
+# Lightweight PKI types (CertificateDer) shared between rcgen, rustls, tonic.
+rustls-pki-types = "1"
+# PEM-to-DER parsing for cert fingerprint verification in the mTLS interceptor.
+rustls-pemfile = "2"
 subtle.workspace = true
 rand.workspace = true
 
