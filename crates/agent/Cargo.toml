@@ -26,6 +26,8 @@ tokio-stream = "0.1"
 # 0.13) so we reuse the same crypto provider tonic's TLS already links, and
 # avoid pulling aws-lc-rs (which needs cmake + a C build on every machine/CI).
 rcgen = { version = "0.13", features = ["x509-parser"] }
+# Lightweight PKI types (CertificateDer) shared between rcgen, rustls, tonic.
+rustls-pki-types = "1"
 subtle.workspace = true
 rand.workspace = true
 

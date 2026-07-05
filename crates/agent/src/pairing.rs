@@ -95,6 +95,37 @@ pub struct PeersStore {
 }
 
 impl PeersStore {
+    /// Create an empty store that won't persist (for fallback when
+    /// peers.json is unavailable).
+    pub fn empty() -> Self {
+        Self {
+            path: PathBuf::new(),
+            inner: Mutex::new(PeersFile {
+                peers: HashMap::new(),
+            }),
+        }
+    }
+
+    /// Open a PeersStore backed by `dir/peers.json`.
+    /// Useful for testing or non-default config locations.
+    #[allow(dead_code)]
+    pub fn open_in(dir: &std::path::Path) -> Result<Self> {
+        let path = dir.join("peers.json");
+        let inner = if path.exists() {
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading peers.json at {path:?}"))?;
+            serde_json::from_str(&raw).with_context(|| format!("parsing peers.json at {path:?}"))?
+        } else {
+            PeersFile {
+                peers: HashMap::new(),
+            }
+        };
+        Ok(Self {
+            path,
+            inner: Mutex::new(inner),
+        })
+    }
+
     pub fn open() -> Result<Self> {
         let path = crate::config::config_dir()?.join("peers.json");
         let inner = if path.exists() {

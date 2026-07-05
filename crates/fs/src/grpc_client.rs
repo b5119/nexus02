@@ -16,7 +16,7 @@ use nexus_proto::fs::v1::{
     WriteFileRequest, WriteFileResponse,
 };
 use tonic::metadata::{Ascii, MetadataValue};
-use tonic::transport::{Certificate, Channel, ClientTlsConfig};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tonic::Request;
 
 /// gRPC metadata header carrying the shared-secret auth token (ADR 0004).
@@ -61,6 +61,56 @@ impl RemoteFs {
         me.stat("/")
             .await
             .context("auth/connectivity check failed (wrong token, or agent unreachable?)")?;
+
+        Ok(me)
+    }
+
+    /// Connects to a remote agent using mTLS authentication.
+    ///
+    /// - `ca_pem` — the host's self-signed certificate, used as the CA to
+    ///   pin the server identity (cert pinning, not PKI).
+    /// - `client_cert_pem` / `client_key_pem` — this device's identity
+    ///   certificate and private key, presented to the server during the
+    ///   TLS handshake for mutual authentication.
+    ///
+    /// No auth token is sent — the server authenticates the caller via the
+    /// client certificate verified against the peer trust store.
+    pub async fn connect_trusted(
+        addr: String,
+        ca_pem: String,
+        client_cert_pem: String,
+        client_key_pem: String,
+    ) -> Result<Self> {
+        let tls = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(ca_pem))
+            .identity(Identity::from_pem(&client_cert_pem, &client_key_pem))
+            .domain_name("localhost");
+
+        let channel = Channel::from_shared(addr)
+            .context("invalid remote address (expected e.g. https://127.0.0.1:50051)")?
+            .tls_config(tls)
+            .context("configuring client mTLS")?
+            .connect()
+            .await
+            .context("connecting to remote agent (mTLS handshake failed?)")?;
+
+        // Empty token placeholder — the authed() helper will set an
+        // x-nexus-token header with this value, but the server's mTLS
+        // path takes precedence and never checks the token when a valid
+        // client cert is presented.
+        let token: MetadataValue<Ascii> =
+            String::new().parse().expect("empty string is valid ASCII");
+
+        let me = Self {
+            client: FileServiceClient::new(channel),
+            token,
+        };
+
+        // Reachability probe — stat("/") succeeds even with an empty token
+        // because the server accepted the mTLS cert at the TLS layer.
+        me.stat("/")
+            .await
+            .context("auth/connectivity check failed (mTLS?)")?;
 
         Ok(me)
     }

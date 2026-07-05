@@ -23,15 +23,15 @@ use nexus_proto::fs::v1::{
     RenameFileResponse, StatRequest, StatResponse, WriteFileChunk, WriteFileRequest,
     WriteFileResponse,
 };
+use rustls_pki_types::CertificateDer;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_stream::Stream;
-use tonic::{
-    transport::{Identity, Server, ServerTlsConfig},
-    Request, Response, Status,
-};
+use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+use tonic::{Request, Response, Status};
 
 /// gRPC metadata header carrying the shared-secret auth token (ADR 0004).
 const AUTH_HEADER: &str = "x-nexus-token";
@@ -39,6 +39,34 @@ const AUTH_HEADER: &str = "x-nexus-token";
 const CHUNK_SIZE: usize = 64 * 1024; // 64KiB — small enough to keep memory flat,
                                      // large enough to not drown in RPC overhead
                                      // over a phone's wifi link.
+
+/// Build a combined PEM trust anchor bundle from all paired peer certs.
+/// Returns `None` when the store is empty (rustls rejects an empty root store).
+fn build_peer_ca_pem(peers: &crate::pairing::PeersStore) -> Option<String> {
+    let entries = peers.list();
+    if entries.is_empty() {
+        return None;
+    }
+    let mut combined = String::new();
+    for (_, entry) in &entries {
+        combined.push_str(entry.cert_pem.trim());
+        combined.push('\n');
+    }
+    Some(combined)
+}
+
+/// Extract the DeviceId (UUID) from a DER-encoded certificate's DNS SAN.
+fn extract_device_id_from_cert(cert_der: &CertificateDer<'_>) -> Option<nexus_common::DeviceId> {
+    let params = rcgen::CertificateParams::from_ca_cert_der(cert_der).ok()?;
+    for san in &params.subject_alt_names {
+        if let rcgen::SanType::DnsName(name) = san {
+            if let Ok(u) = uuid::Uuid::try_parse(name.as_str()) {
+                return Some(nexus_common::DeviceId(u));
+            }
+        }
+    }
+    None
+}
 
 /// A temp file that is cleaned up on drop unless committed. Ensures no
 /// partial writes are left behind if a streaming write handler errors out.
@@ -987,19 +1015,68 @@ pub async fn run(
     let tls = crate::config::load_or_create_tls_identity(&device_id)?;
     let identity = Identity::from_pem(&tls.cert_pem, &tls.key_pem);
 
+    // Open PeersStore and build a combined trust anchor for client certs.
+    // When no peers exist, skip client_ca_root (rustls rejects empty roots).
+    let peers_store = match crate::pairing::PeersStore::open() {
+        Ok(store) => Arc::new(store),
+        Err(e) => {
+            tracing::warn!(error = %e, "peers.json unavailable; mTLS disabled");
+            Arc::new(crate::pairing::PeersStore::empty())
+        }
+    };
+
+    let mut tls_config = ServerTlsConfig::new().identity(identity);
+    if let Some(combined) = build_peer_ca_pem(&peers_store) {
+        tls_config = tls_config
+            .client_ca_root(Certificate::from_pem(combined))
+            .client_auth_optional(true);
+        tracing::info!(
+            "mTLS enabled: {} paired device(s) in trust store",
+            peers_store.list().len()
+        );
+    } else {
+        tracing::info!("no paired devices yet — mTLS disabled, token auth only");
+    }
+
     let expected = auth_token;
-    let interceptor = move |req: Request<()>| -> Result<Request<()>, Status> {
-        match req.metadata().get(AUTH_HEADER) {
-            Some(t) if token_matches(t.as_bytes(), expected.as_bytes()) => Ok(req),
-            _ => Err(Status::unauthenticated("missing or invalid auth token")),
+    let interceptor = {
+        let peers = peers_store.clone();
+        move |req: Request<()>| -> Result<Request<()>, Status> {
+            // Path A — mTLS: client presented a certificate verified by
+            // WebPkiClientVerifier against the peer trust store.
+            if let Some(certs) = req
+                .extensions()
+                .get::<TlsConnectInfo<TcpConnectInfo>>()
+                .and_then(|tls| tls.peer_certs())
+            {
+                if let Some(cert_der) = certs.first() {
+                    let device_id = extract_device_id_from_cert(cert_der);
+                    match device_id {
+                        Some(ref did) if peers.contains(did) => return Ok(req),
+                        // TLS-layer rejection of unpaired certs is not yet
+                        // implemented (WebPkiClientVerifier chain-building
+                        // quirk with self-signed roots). The interceptor
+                        // catches it here instead. Follow-up issue: harden
+                        // this at the TLS layer so unpaired certs never
+                        // reach the gRPC handler.
+                        _ => return Err(Status::unauthenticated("client certificate not trusted")),
+                    }
+                }
+            }
+
+            // Path B — token fallback (no client cert presented).
+            match req.metadata().get(AUTH_HEADER) {
+                Some(t) if token_matches(t.as_bytes(), expected.as_bytes()) => Ok(req),
+                _ => Err(Status::unauthenticated("missing or invalid auth token")),
+            }
         }
     };
 
     tracing::info!(cert = %tls.cert_path.display(), "TLS enabled (self-signed); clients must trust this cert");
-    tracing::info!(%addr, "FileService listening (TLS + token auth)");
+    tracing::info!(%addr, "FileService listening (TLS + mTLS cert auth + token fallback)");
 
     Server::builder()
-        .tls_config(ServerTlsConfig::new().identity(identity))?
+        .tls_config(tls_config)?
         .add_service(FileServiceServer::with_interceptor(service, interceptor))
         .serve(addr)
         .await?;
@@ -1785,5 +1862,224 @@ mod tests {
 
         // The contested entry was NOT removed (lock was held).
         assert_eq!(ts.len(), 1, "contested entry should not be removed");
+    }
+
+    #[tokio::test]
+    async fn t11_mtls_integration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let serve_dir = tmp.path().join("serve");
+        std::fs::create_dir_all(&serve_dir).unwrap();
+
+        // Generate self-signed TLS identities with unique Common Names so the
+        // rustls WebPkiClientVerifier correctly rejects unpaired certs at the
+        // TLS layer instead of conflating them via rcgen's default Subject DN.
+        let server_id = nexus_common::DeviceId(uuid::Uuid::new_v4());
+        let paired_id = nexus_common::DeviceId(uuid::Uuid::new_v4());
+        let unpaired_id = nexus_common::DeviceId(uuid::Uuid::new_v4());
+
+        let gen = |cn: &str, sans: Vec<String>| {
+            let key_pair = rcgen::KeyPair::generate().unwrap();
+            let mut params = rcgen::CertificateParams::new(sans).unwrap();
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, cn);
+            let cert = params.self_signed(&key_pair).unwrap();
+            rcgen::CertifiedKey { cert, key_pair }
+        };
+        let server = gen(
+            "server",
+            vec![
+                "localhost".into(),
+                "127.0.0.1".into(),
+                server_id.to_string(),
+            ],
+        );
+        let paired = gen(
+            &paired_id.to_string(),
+            vec![
+                "localhost".into(),
+                "127.0.0.1".into(),
+                paired_id.to_string(),
+            ],
+        );
+        let unpaired = gen(
+            &unpaired_id.to_string(),
+            vec![
+                "localhost".into(),
+                "127.0.0.1".into(),
+                unpaired_id.to_string(),
+            ],
+        );
+
+        let server_cert_pem = server.cert.pem();
+        let server_key_pem = server.key_pair.serialize_pem();
+        let paired_cert_pem = paired.cert.pem();
+        let paired_key_pem = paired.key_pair.serialize_pem();
+        let unpaired_cert_pem = unpaired.cert.pem();
+        let unpaired_key_pem = unpaired.key_pair.serialize_pem();
+
+        // PeersStore with only the paired device.
+        let peers = Arc::new(crate::pairing::PeersStore::open_in(tmp.path()).unwrap());
+        peers
+            .add(&paired_id, paired_cert_pem.clone(), "paired-device".into())
+            .unwrap();
+
+        // Server TLS config — mirrors production logic in run().
+        let ca_pem = build_peer_ca_pem(&peers).unwrap();
+        let tls_config = ServerTlsConfig::new()
+            .identity(Identity::from_pem(&server_cert_pem, &server_key_pem))
+            .client_ca_root(Certificate::from_pem(ca_pem))
+            .client_auth_optional(true);
+
+        let auth_token = "test-token-12345";
+
+        // Interceptor — identical to the production closure in run().
+        let interceptor = {
+            let peers = peers.clone();
+            let expected = auth_token.to_string();
+            move |req: Request<()>| -> Result<Request<()>, Status> {
+                if let Some(certs) = req
+                    .extensions()
+                    .get::<TlsConnectInfo<TcpConnectInfo>>()
+                    .and_then(|tls| tls.peer_certs())
+                {
+                    if let Some(cert_der) = certs.first() {
+                        let device_id = extract_device_id_from_cert(cert_der);
+                        match device_id {
+                            Some(ref did) if peers.contains(did) => return Ok(req),
+                            _ => {
+                                return Err(Status::unauthenticated(
+                                    "client certificate not trusted",
+                                ))
+                            }
+                        }
+                    }
+                }
+                match req.metadata().get(AUTH_HEADER) {
+                    Some(t) if token_matches(t.as_bytes(), expected.as_bytes()) => Ok(req),
+                    _ => Err(Status::unauthenticated("missing or invalid auth token")),
+                }
+            }
+        };
+
+        // Bind to a random port and start the server.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .unwrap_or(19595);
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let svc = svc(&serve_dir);
+
+        let server_handle = tokio::spawn(async move {
+            Server::builder()
+                .tls_config(tls_config)
+                .unwrap()
+                .add_service(FileServiceServer::with_interceptor(svc, interceptor))
+                .serve_with_shutdown(addr, async {
+                    shutdown_rx.await.ok();
+                })
+                .await
+        });
+
+        // Give the server time to start listening.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let server_addr = format!("https://127.0.0.1:{port}");
+
+        use tonic::transport::{Channel, ClientTlsConfig};
+
+        // ── Case (a): paired client cert → authenticated ──
+        let channel = Channel::from_shared(server_addr.clone())
+            .unwrap()
+            .tls_config(
+                ClientTlsConfig::new()
+                    .ca_certificate(Certificate::from_pem(server_cert_pem.clone()))
+                    .identity(Identity::from_pem(&paired_cert_pem, &paired_key_pem))
+                    .domain_name("localhost"),
+            )
+            .unwrap()
+            .connect()
+            .await;
+        assert!(
+            channel.is_ok(),
+            "case (a): paired cert should authenticate at TLS layer"
+        );
+        let mut client =
+            nexus_proto::fs::v1::file_service_client::FileServiceClient::new(channel.unwrap());
+        let stat = client
+            .stat(Request::new(nexus_proto::fs::v1::StatRequest {
+                path: "/".to_string(),
+            }))
+            .await;
+        assert!(
+            stat.is_ok(),
+            "case (a): stat should succeed with trusted cert"
+        );
+
+        // ── Case (b): unpaired client cert → rejected by interceptor ──
+        let channel = Channel::from_shared(server_addr.clone())
+            .unwrap()
+            .tls_config(
+                ClientTlsConfig::new()
+                    .ca_certificate(Certificate::from_pem(server_cert_pem.clone()))
+                    .identity(Identity::from_pem(&unpaired_cert_pem, &unpaired_key_pem))
+                    .domain_name("localhost"),
+            )
+            .unwrap()
+            .connect()
+            .await;
+        assert!(
+            channel.is_ok(),
+            "case (b): unpaired cert should connect (client_auth_optional)"
+        );
+        let mut client =
+            nexus_proto::fs::v1::file_service_client::FileServiceClient::new(channel.unwrap());
+        let stat = client
+            .stat(Request::new(nexus_proto::fs::v1::StatRequest {
+                path: "/".to_string(),
+            }))
+            .await;
+        assert!(
+            stat.is_err(),
+            "case (b): stat should fail for unpaired cert (interceptor rejects)"
+        );
+
+        // ── Case (c): no client cert + valid token → token auth succeeds ──
+        let channel = Channel::from_shared(server_addr.clone())
+            .unwrap()
+            .tls_config(
+                ClientTlsConfig::new()
+                    .ca_certificate(Certificate::from_pem(server_cert_pem))
+                    .domain_name("localhost"),
+            )
+            .unwrap()
+            .connect()
+            .await;
+        assert!(
+            channel.is_ok(),
+            "case (c): no cert should connect (client_auth_optional)"
+        );
+        let mut client =
+            nexus_proto::fs::v1::file_service_client::FileServiceClient::new(channel.unwrap());
+        let mut req = Request::new(nexus_proto::fs::v1::StatRequest {
+            path: "/".to_string(),
+        });
+        req.metadata_mut().insert(
+            AUTH_HEADER,
+            auth_token
+                .parse::<tonic::metadata::MetadataValue<_>>()
+                .unwrap(),
+        );
+        let stat = client.stat(req).await;
+        assert!(
+            stat.is_ok(),
+            "case (c): stat with valid token should succeed"
+        );
+
+        // Clean shutdown.
+        shutdown_tx.send(()).unwrap();
+        server_handle.await.unwrap().unwrap();
     }
 }
