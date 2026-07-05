@@ -1,0 +1,53 @@
+syntax = "proto3";
+package nexus.stream.v1;
+
+// StreamService is the real-time screen streaming and remote control
+// RPC.  The bidirectional stream carries compressed video frames from
+// host to viewer and input events from viewer to host.
+// See ADR 0014.
+service StreamService {
+  // Bidirectional streaming:
+  //   viewer → host: InputEvent stream
+  //   host → viewer: VideoFrame stream
+  rpc RemoteControl(stream InputEvent) returns (stream VideoFrame);
+}
+
+message VideoFrame {
+  uint64 sequence = 1;       // Monotonically increasing frame counter
+  uint64 timestamp_ms = 2;   // Capture timestamp (host monotonic clock)
+  uint32 width = 3;           // Frame width in pixels
+  uint32 height = 4;          // Frame height in pixels
+  bytes data = 5;             // Encoded H.264 NAL units
+  bool keyframe = 6;          // True if this frame is a keyframe (IDR)
+}
+
+enum InputEventType {
+  INPUT_EVENT_TYPE_UNSPECIFIED = 0;
+  KEYBOARD = 1;
+  MOUSE = 2;
+  TOUCH = 3;
+}
+
+enum MouseButton {
+  MOUSE_BUTTON_UNSPECIFIED = 0;
+  NONE = 1;
+  LEFT = 2;
+  RIGHT = 3;
+  MIDDLE = 4;
+}
+
+enum InputAction {
+  INPUT_ACTION_UNSPECIFIED = 0;
+  PRESS = 1;
+  RELEASE = 2;
+  MOVE = 3;
+}
+
+message InputEvent {
+  InputEventType event_type = 1;
+  uint32 key_code = 2;         // Linux keycode (when type == KEYBOARD)
+  uint32 x = 3;                // X coordinate (mouse/touch)
+  uint32 y = 4;                // Y coordinate (mouse/touch)
+  MouseButton button = 5;
+  InputAction action = 6;
+}

@@ -6,6 +6,7 @@ members = [
     "crates/agent",
     "crates/fs",
     "crates/migrate",
+    "crates/stream",
 ]
 
 # Shared dependency versions across the workspace.
@@ -26,6 +27,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 subtle = "2"
 rand = { version = "0.8", features = ["getrandom"] }
+ffmpeg-next = "7"
+winit = { version = "0.30", default-features = false }
+pixels = "0.13"
+tokio-stream = "0.1"
+futures-util = "0.3"
 
 [profile.dev]
 # Lower debug info verbosity to ease RAM pressure during compilation
