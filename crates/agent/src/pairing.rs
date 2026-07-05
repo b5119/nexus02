@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -6,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use rand::rngs::OsRng;
 use rand::Rng;
+use rustls_pki_types::CertificateDer;
 use subtle::ConstantTimeEq;
 use tonic::{transport::Server, Request, Response, Status};
 
@@ -160,6 +162,25 @@ impl PeersStore {
         let map = self.inner.lock().unwrap();
         match map.peers.get(&device_id.to_string()) {
             Some(entry) => entry.cert_pem == cert_pem,
+            None => false,
+        }
+    }
+
+    /// Verify a DER-encoded client certificate against the stored PEM for
+    /// the given device ID.  Parses the stored PEM to DER and compares bytes,
+    /// preventing a device-ID-only check from accepting a different cert that
+    /// happens to carry the same UUID in its DNS SAN.
+    pub fn verify_cert_der(&self, device_id: &DeviceId, presented_der: &CertificateDer<'_>) -> bool {
+        let map = self.inner.lock().unwrap();
+        match map.peers.get(&device_id.to_string()) {
+            Some(entry) => {
+                let mut reader = BufReader::new(entry.cert_pem.as_bytes());
+                let mut iter = rustls_pemfile::certs(&mut reader);
+                match iter.next() {
+                    Some(Ok(stored_der)) => stored_der.as_ref() == presented_der.as_ref(),
+                    _ => false,
+                }
+            }
             None => false,
         }
     }

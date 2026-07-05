@@ -1052,13 +1052,7 @@ pub async fn run(
                 if let Some(cert_der) = certs.first() {
                     let device_id = extract_device_id_from_cert(cert_der);
                     match device_id {
-                        Some(ref did) if peers.contains(did) => return Ok(req),
-                        // TLS-layer rejection of unpaired certs is not yet
-                        // implemented (WebPkiClientVerifier chain-building
-                        // quirk with self-signed roots). The interceptor
-                        // catches it here instead. Follow-up issue: harden
-                        // this at the TLS layer so unpaired certs never
-                        // reach the gRPC handler.
+                        Some(ref did) if peers.verify_cert_der(did, cert_der) => return Ok(req),
                         _ => return Err(Status::unauthenticated("client certificate not trusted")),
                     }
                 }
@@ -1946,7 +1940,7 @@ mod tests {
                     if let Some(cert_der) = certs.first() {
                         let device_id = extract_device_id_from_cert(cert_der);
                         match device_id {
-                            Some(ref did) if peers.contains(did) => return Ok(req),
+                            Some(ref did) if peers.verify_cert_der(did, cert_der) => return Ok(req),
                             _ => {
                                 return Err(Status::unauthenticated(
                                     "client certificate not trusted",
@@ -1962,12 +1956,18 @@ mod tests {
             }
         };
 
-        // Bind to a random port and start the server.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|l| l.local_addr())
-            .map(|a| a.port())
-            .unwrap_or(19595);
-        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        // Bind a TCP listener before spawning the server so the port is
+        // reserved atomically — eliminates the TOCTOU race between probing
+        // for a free port and the server binding it.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("binding test listener");
+        std_listener
+            .set_nonblocking(true)
+            .expect("setting non-blocking");
+        let port = std_listener.local_addr().expect("getting local addr").port();
+        let tokio_listener = tokio::net::TcpListener::from_std(std_listener)
+            .expect("converting to tokio listener");
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(tokio_listener);
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let svc = svc(&serve_dir);
@@ -1977,14 +1977,11 @@ mod tests {
                 .tls_config(tls_config)
                 .unwrap()
                 .add_service(FileServiceServer::with_interceptor(svc, interceptor))
-                .serve_with_shutdown(addr, async {
+                .serve_with_incoming_shutdown(incoming, async {
                     shutdown_rx.await.ok();
                 })
                 .await
         });
-
-        // Give the server time to start listening.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         let server_addr = format!("https://127.0.0.1:{port}");
 

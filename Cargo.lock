@@ -866,6 +866,7 @@ dependencies = [
  "prost",
  "rand",
  "rcgen",
+ "rustls-pemfile",
  "rustls-pki-types",
  "serde",
  "serde_json",

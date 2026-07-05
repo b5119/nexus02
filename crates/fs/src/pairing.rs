@@ -125,8 +125,11 @@ pub async fn pair_with_host(
 
     let tls = match ca_cert_pem {
         Some(pem) => tonic::transport::ClientTlsConfig::new()
-            .ca_certificate(tonic::transport::Certificate::from_pem(pem)),
-        None => tonic::transport::ClientTlsConfig::new().with_enabled_roots(),
+            .ca_certificate(tonic::transport::Certificate::from_pem(pem))
+            .domain_name("localhost"),
+        None => tonic::transport::ClientTlsConfig::new()
+            .with_enabled_roots()
+            .domain_name("localhost"),
     };
 
     let channel = Channel::builder(uri)
