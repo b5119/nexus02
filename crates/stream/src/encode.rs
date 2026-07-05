@@ -24,6 +24,7 @@ pub struct Encoder {
     inner: FfmpegEncoder,
 }
 
+#[cfg(any(feature = "ffmpeg", test))]
 fn scale_dimensions(w: u32, h: u32) -> (u32, u32) {
     if w <= 1920 && h <= 1080 {
         return (w, h);
