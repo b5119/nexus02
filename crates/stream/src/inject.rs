@@ -149,7 +149,9 @@ impl Injector {
 
                 ioctl_set(raw_fd, sys::UI_DEV_CREATE, 0)?;
 
-                tracing::info!("input injection enabled: /dev/uinput accessible, virtual device created");
+                tracing::info!(
+                    "input injection enabled: /dev/uinput accessible, virtual device created"
+                );
                 Some(f)
             }
             Err(_) => {
@@ -320,9 +322,15 @@ mod tests {
                 y: 0,
                 button: 0,
             };
-            assert!(injector.inject(&event).is_ok(), "inject must not fail even when uinput is missing");
+            assert!(
+                injector.inject(&event).is_ok(),
+                "inject must not fail even when uinput is missing"
+            );
             if !has_uinput {
-                assert!(injector.fd.is_none(), "fd should be None when uinput is missing");
+                assert!(
+                    injector.fd.is_none(),
+                    "fd should be None when uinput is missing"
+                );
             }
         }
     }

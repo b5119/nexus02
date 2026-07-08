@@ -29,8 +29,7 @@ struct SyntheticStreamHost {
 
 #[tonic::async_trait]
 impl StreamService for SyntheticStreamHost {
-    type RemoteControlStream =
-        tokio_stream::wrappers::ReceiverStream<Result<VideoFrame, Status>>;
+    type RemoteControlStream = tokio_stream::wrappers::ReceiverStream<Result<VideoFrame, Status>>;
 
     async fn remote_control(
         &self,
@@ -70,9 +69,7 @@ impl StreamService for SyntheticStreamHost {
                         }
                     }
                     Err(e) => {
-                        let _ = tx
-                            .send(Err(Status::internal(format!("encode: {e}"))))
-                            .await;
+                        let _ = tx.send(Err(Status::internal(format!("encode: {e}")))).await;
                         break;
                     }
                 }
@@ -91,8 +88,7 @@ impl StreamService for SyntheticStreamHost {
 async fn t6_loopback_stream_synthetic_bgra_to_videoframe() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_test_writer()
         .try_init();

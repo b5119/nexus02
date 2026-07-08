@@ -40,7 +40,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             protobuf-compiler libfuse3-dev pkg-config \
             libx11-dev libxrandr-dev libxcursor-dev libxi-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libx264-dev \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
+            libpostproc-dev libswresample-dev libswscale-dev libx264-dev \
             libpipewire-0.3-dev \
             xvfb
 
@@ -77,7 +78,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             protobuf-compiler libfuse3-dev pkg-config \
             libx11-dev libxrandr-dev libxcursor-dev libxi-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libx264-dev \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
+            libpostproc-dev libswresample-dev libswscale-dev libx264-dev \
             libpipewire-0.3-dev \
             xvfb
 

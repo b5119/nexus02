@@ -26,8 +26,7 @@ impl ScreenCapture {
     #[cfg(target_os = "linux")]
     pub fn new(fps: f64) -> Result<Self> {
         #[cfg(feature = "ffmpeg")]
-        let is_wayland = std::env::var("WAYLAND_DISPLAY")
-            .is_ok_and(|v| !v.is_empty())
+        let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty())
             || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland");
 
         #[cfg(feature = "ffmpeg")]
@@ -38,10 +37,7 @@ impl ScreenCapture {
                     return Ok(Self::PipeWire(cap));
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "PipeWire capture failed ({}), falling back to X11",
-                        e
-                    );
+                    tracing::warn!("PipeWire capture failed ({}), falling back to X11", e);
                 }
             }
         }
@@ -100,14 +96,12 @@ mod pipewire_capture {
     use std::sync::{Arc, Mutex};
 
     use anyhow::{Context, Result};
-    use ashpd::desktop::screencast::{
-        CursorMode, Screencast, SelectSourcesOptions, SourceType,
-    };
+    use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
     use pipewire as pw;
     use pipewire::main_loop::MainLoopBox;
     use pipewire::properties::PropertiesBox;
-    use pipewire::stream::{StreamBox, StreamListener};
     use pipewire::spa::utils::Direction;
+    use pipewire::stream::{StreamBox, StreamListener};
 
     use super::CapturedFrame;
 
@@ -135,8 +129,7 @@ mod pipewire_capture {
 
     impl PipeWireCapture {
         pub fn new(fps: f64) -> Result<Self> {
-            let frame_buffer: Arc<Mutex<Option<CapturedFrame>>> =
-                Arc::new(Mutex::new(None));
+            let frame_buffer: Arc<Mutex<Option<CapturedFrame>>> = Arc::new(Mutex::new(None));
 
             // --- ashpd: create screencast session ---
             // Spawn a dedicated OS thread to avoid "Cannot start a runtime
@@ -172,9 +165,7 @@ mod pipewire_capture {
                         }
                         let stream = &streams[0];
                         let node_id = stream.pipe_wire_node_id();
-                        let size = stream
-                            .size()
-                            .context("screencast stream has no size")?;
+                        let size = stream.size().context("screencast stream has no size")?;
                         tracing::info!(
                             "screencast: node_id={} width={} height={}",
                             node_id,
@@ -211,29 +202,25 @@ mod pipewire_capture {
             // --- pipewire: connect and create stream ---
             pw::init();
 
-            let main_loop = MainLoopBox::new(None)
-                .context("failed to create PipeWire main loop")?;
+            let main_loop =
+                MainLoopBox::new(None).context("failed to create PipeWire main loop")?;
 
             // Extend lifetimes: the Loop lives inside MainLoopBox, ContextBox
             // borrows it.  Since MainLoopBox outlives everything, this is safe.
-            let loop_ref: &'static pw::loop_::Loop = unsafe {
-                std::mem::transmute(main_loop.as_ref().loop_())
-            };
+            let loop_ref: &'static pw::loop_::Loop =
+                unsafe { std::mem::transmute(main_loop.as_ref().loop_()) };
 
             let context = pw::context::ContextBox::new(loop_ref, None)
                 .context("failed to create PipeWire context")?;
 
-            let context_ref: &'static pw::context::Context = unsafe {
-                std::mem::transmute(context.as_ref())
-            };
+            let context_ref: &'static pw::context::Context =
+                unsafe { std::mem::transmute(context.as_ref()) };
 
             let core = context_ref
                 .connect(None)
                 .context("failed to connect to PipeWire")?;
 
-            let core_ref: &'static pw::core::Core = unsafe {
-                std::mem::transmute(core.as_ref())
-            };
+            let core_ref: &'static pw::core::Core = unsafe { std::mem::transmute(core.as_ref()) };
 
             let mut props = PropertiesBox::new();
             props.insert("media.type", "Video");
@@ -281,10 +268,7 @@ mod pipewire_capture {
                 )
                 .context("failed to connect PipeWire stream to screencast node")?;
 
-            tracing::info!(
-                "PipeWire capture stream connected: node_id={}",
-                node_id
-            );
+            tracing::info!("PipeWire capture stream connected: node_id={}", node_id);
 
             Ok(Self {
                 width,
@@ -367,7 +351,9 @@ impl X11Capture {
     pub fn new(fps: f64) -> Result<Self> {
         // Install a silent error handler BEFORE opening the display so that
         // XGetImage failures return NULL instead of printing to stderr + hanging.
-        unsafe { x11::xlib::XSetErrorHandler(Some(silent_handler)); }
+        unsafe {
+            x11::xlib::XSetErrorHandler(Some(silent_handler));
+        }
 
         let display = unsafe { x11::xlib::XOpenDisplay(std::ptr::null()) };
         if display.is_null() {
@@ -378,9 +364,7 @@ impl X11Capture {
         let _ = screen;
 
         let mut root_attrs: x11::xlib::XWindowAttributes = unsafe { std::mem::zeroed() };
-        let attrs_ok = unsafe {
-            x11::xlib::XGetWindowAttributes(display, root, &mut root_attrs)
-        };
+        let attrs_ok = unsafe { x11::xlib::XGetWindowAttributes(display, root, &mut root_attrs) };
         if attrs_ok == 0 {
             unsafe { x11::xlib::XCloseDisplay(display) };
             anyhow::bail!("XGetWindowAttributes failed");

@@ -248,7 +248,10 @@ async fn main() -> Result<()> {
                 .trim_start_matches("https://")
                 .rsplit_once(':')
                 .map(|(h, _)| h)
-                .unwrap_or(host.trim_start_matches("http://").trim_start_matches("https://"));
+                .unwrap_or(
+                    host.trim_start_matches("http://")
+                        .trim_start_matches("https://"),
+                );
             println!("To mount, run: NEXUS_TRUSTED_HOST_ID={host_id} nexus-mount mount --remote https://{host_part}:50051 --mountpoint <dir> --trusted");
 
             Ok(())

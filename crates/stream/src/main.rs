@@ -54,9 +54,8 @@ async fn main() -> Result<()> {
         }
         let raw = std::fs::read_to_string(&store_path)
             .with_context(|| format!("reading {}", store_path.display()))?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&raw)
-                .with_context(|| format!("parsing {}", store_path.display()))?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw)
+            .with_context(|| format!("parsing {}", store_path.display()))?;
         let hosts = parsed
             .get("hosts")
             .and_then(|v| v.as_object())
