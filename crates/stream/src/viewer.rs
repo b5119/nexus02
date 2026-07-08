@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::Channel;
 use tonic::Request;
 
@@ -10,12 +11,16 @@ use crate::decode::Decoder;
 use crate::display::ViewerDisplay;
 use crate::encode::EncodedFrame;
 
+/// gRPC metadata header carrying the shared-secret auth token.
+const AUTH_HEADER: &str = "x-nexus-token";
+
 /// Stream viewer: connects to a host, receives H.264 frames, decodes
 /// and displays them, and forwards input events back to the host.
 pub struct StreamViewer {
     client: StreamServiceClient<Channel>,
     decoder: Arc<Mutex<Decoder>>,
     display: ViewerDisplay,
+    token: MetadataValue<Ascii>,
 }
 
 impl StreamViewer {
@@ -24,9 +29,17 @@ impl StreamViewer {
         host_device_id: &str,
         token: Option<&str>,
         trusted_ca_pem: Option<&str>,
+        client_cert_pem: Option<&str>,
+        client_key_pem: Option<&str>,
     ) -> Result<Self> {
-        let channel = connect_channel(addr, token, trusted_ca_pem).await?;
+        let channel =
+            connect_channel(addr, trusted_ca_pem, client_cert_pem, client_key_pem).await?;
         let client = StreamServiceClient::new(channel);
+
+        let token_val: MetadataValue<Ascii> = token
+            .unwrap_or("")
+            .parse()
+            .context("auth token must be valid ASCII")?;
 
         let width = 1920;
         let height = 1080;
@@ -40,6 +53,7 @@ impl StreamViewer {
             client,
             decoder,
             display,
+            token: token_val,
         })
     }
 
@@ -49,10 +63,9 @@ impl StreamViewer {
         let (input_tx, input_rx) = tokio::sync::mpsc::channel::<InputEvent>(256);
 
         let input_stream = tokio_stream::wrappers::ReceiverStream::new(input_rx);
-        let response = self
-            .client
-            .remote_control(Request::new(input_stream))
-            .await?;
+        let mut req = Request::new(input_stream);
+        req.metadata_mut().insert(AUTH_HEADER, self.token.clone());
+        let response = self.client.remote_control(req).await?;
         let mut response_stream = response.into_inner();
 
         tracing::info!("viewer event loop started");
@@ -90,18 +103,32 @@ impl StreamViewer {
 
 async fn connect_channel(
     addr: &str,
-    _token: Option<&str>,
     trusted_ca_pem: Option<&str>,
+    client_cert_pem: Option<&str>,
+    client_key_pem: Option<&str>,
 ) -> Result<Channel> {
-    use tonic::transport::{Certificate, Channel as TonicChannel, ClientTlsConfig};
+    use tonic::transport::{Certificate, Channel as TonicChannel, ClientTlsConfig, Identity};
 
-    let uri: tonic::transport::Uri = addr.parse()?;
+    // Normalize to https://host:port — handles "127.0.0.1:50051",
+    // "http://127.0.0.1:50051", "https://127.0.0.1:50051".
+    let input = addr
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let (host, port) = match input.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, p),
+        _ => (input, "50051"),
+    };
+    let normalized = format!("https://{host}:{port}");
+    let uri: tonic::transport::Uri = normalized.parse()?;
     let mut channel_builder = TonicChannel::builder(uri);
 
     if let Some(ca_pem) = trusted_ca_pem {
-        let tls = ClientTlsConfig::new()
+        let mut tls = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(ca_pem))
             .domain_name("localhost");
+        if let (Some(cert), Some(key)) = (client_cert_pem, client_key_pem) {
+            tls = tls.identity(Identity::from_pem(cert, key));
+        }
         channel_builder = channel_builder.tls_config(tls)?;
     }
 

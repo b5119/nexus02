@@ -33,7 +33,8 @@ impl ViewerDisplay {
             use winit::application::ApplicationHandler;
             use winit::dpi::LogicalSize;
             use winit::event::WindowEvent;
-            use winit::event_loop::{ActiveEventLoop, EventLoop};
+            use winit::event_loop::ActiveEventLoop;
+            use winit::platform::x11::EventLoopBuilderExtX11;
             use winit::window::{Window, WindowId};
 
             struct DisplayApp {
@@ -162,7 +163,10 @@ impl ViewerDisplay {
                 }
             }
 
-            let event_loop = EventLoop::new().unwrap();
+            let event_loop = winit::event_loop::EventLoop::builder()
+                .with_any_thread(true)
+                .build()
+                .unwrap();
 
             let mut app = DisplayApp {
                 window: None,

@@ -120,7 +120,16 @@ pub async fn pair_with_host(
     display_name: &str,
     ca_cert_pem: Option<&str>,
 ) -> Result<(String, String)> {
-    let addr = format!("https://{host}:{port}");
+    // Normalize input to https://host:port.  Handles all three input forms:
+    //   "127.0.0.1:50052", "http://127.0.0.1:50052", "https://..."
+    let input = host
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let (host_part, port_part) = match input.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, p.parse::<u16>()?),
+        _ => (input, port),
+    };
+    let addr = format!("https://{host_part}:{port_part}");
     let uri: tonic::transport::Uri = addr.parse()?;
 
     let tls = match ca_cert_pem {

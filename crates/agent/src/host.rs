@@ -1083,7 +1083,11 @@ pub async fn run(
             ));
 
     let router = if enable_streaming {
-        let capture = nexus_stream::capture::X11Capture::new(fps as f64)?;
+        let capture = tokio::task::spawn_blocking(move || {
+            nexus_stream::capture::ScreenCapture::new(fps as f64)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("capture init failed: {e}"))??;
         let (width, height) = capture.dimensions();
         let encoder = nexus_stream::encode::Encoder::new(width, height)?;
         let injector = nexus_stream::inject::Injector::new()?;

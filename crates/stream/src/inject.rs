@@ -9,14 +9,14 @@ use std::os::unix::io::AsRawFd;
 /// using raw ioctl syscalls (no libudev dependency).
 #[cfg(target_os = "linux")]
 pub struct Injector {
-    fd: File,
+    fd: Option<File>,
 }
 
 #[cfg(target_os = "linux")]
 impl std::fmt::Debug for Injector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Injector")
-            .field("fd", &self.fd.as_raw_fd())
+            .field("fd", &self.fd.as_ref().map(|fd| fd.as_raw_fd()))
             .finish()
     }
 }
@@ -84,88 +84,90 @@ impl Injector {
             .write(true)
             .open("/dev/uinput")
         {
-            Ok(f) => f,
+            Ok(f) => {
+                let raw_fd = f.as_raw_fd();
+
+                ioctl_set(raw_fd, sys::UI_SET_EVBIT, sys::EV_KEY as i32)?;
+                ioctl_set(raw_fd, sys::UI_SET_EVBIT, sys::EV_REL as i32)?;
+                ioctl_set(raw_fd, sys::UI_SET_EVBIT, sys::EV_ABS as i32)?;
+
+                ioctl_set(raw_fd, sys::UI_SET_KEYBIT, sys::BTN_LEFT as i32)?;
+                ioctl_set(raw_fd, sys::UI_SET_KEYBIT, sys::BTN_RIGHT as i32)?;
+                ioctl_set(raw_fd, sys::UI_SET_KEYBIT, sys::BTN_MIDDLE as i32)?;
+                ioctl_set(raw_fd, sys::UI_SET_KEYBIT, sys::BTN_TOUCH as i32)?;
+
+                for keycode in 1..=255 {
+                    ioctl_set(raw_fd, sys::UI_SET_KEYBIT, keycode)?;
+                }
+
+                ioctl_set(raw_fd, sys::UI_SET_RELBIT, sys::REL_X as i32)?;
+                ioctl_set(raw_fd, sys::UI_SET_RELBIT, sys::REL_Y as i32)?;
+
+                ioctl_set(raw_fd, sys::UI_SET_ABSBIT, sys::ABS_X as i32)?;
+                ioctl_set(raw_fd, sys::UI_SET_ABSBIT, sys::ABS_Y as i32)?;
+
+                let dev = sys::uinput_user_dev {
+                    name: {
+                        let mut n = [0u8; sys::UINPUT_MAX_NAME_SIZE];
+                        let name = b"nexus-virtual-input\0";
+                        let len = name.len().min(sys::UINPUT_MAX_NAME_SIZE);
+                        n[..len].copy_from_slice(&name[..len]);
+                        n
+                    },
+                    id: libc::input_id {
+                        bustype: sys::BUS_USB,
+                        vendor: 0x1,
+                        product: 0x1,
+                        version: 0x1,
+                    },
+                    ff_effects_max: 0,
+                    absmax: {
+                        let mut a = [-1i32; 64];
+                        a[sys::ABS_X as usize] = sys::ABS_MAX_X;
+                        a[sys::ABS_Y as usize] = sys::ABS_MAX_Y;
+                        a
+                    },
+                    absmin: [0i32; 64],
+                    absfuzz: [0i32; 64],
+                    absflat: [0i32; 64],
+                };
+
+                let dev_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        &dev as *const sys::uinput_user_dev as *const u8,
+                        std::mem::size_of::<sys::uinput_user_dev>(),
+                    )
+                };
+
+                unsafe {
+                    libc::write(
+                        raw_fd,
+                        dev_bytes.as_ptr() as *const libc::c_void,
+                        dev_bytes.len(),
+                    );
+                }
+
+                ioctl_set(raw_fd, sys::UI_DEV_CREATE, 0)?;
+
+                tracing::info!("input injection enabled: /dev/uinput accessible, virtual device created");
+                Some(f)
+            }
             Err(_) => {
-                anyhow::bail!(
-                    "/dev/uinput not accessible. \
-                     To use input injection:\n  \
-                     sudo usermod -a -G input $USER\n  \
-                     # then log out and back in\n  \
-                     # Or run with CAP_SYS_ADMIN\n  \
-                     # Or run as root"
+                tracing::warn!(
+                    "/dev/uinput not accessible — input injection disabled. \
+                     To enable: sudo usermod -a -G input $USER && logout"
                 );
+                None
             }
         };
 
-        let raw_fd = fd.as_raw_fd();
-
-        ioctl_set(raw_fd, sys::UI_SET_EVBIT, sys::EV_KEY as i32)?;
-        ioctl_set(raw_fd, sys::UI_SET_EVBIT, sys::EV_REL as i32)?;
-        ioctl_set(raw_fd, sys::UI_SET_EVBIT, sys::EV_ABS as i32)?;
-
-        ioctl_set(raw_fd, sys::UI_SET_KEYBIT, sys::BTN_LEFT as i32)?;
-        ioctl_set(raw_fd, sys::UI_SET_KEYBIT, sys::BTN_RIGHT as i32)?;
-        ioctl_set(raw_fd, sys::UI_SET_KEYBIT, sys::BTN_MIDDLE as i32)?;
-        ioctl_set(raw_fd, sys::UI_SET_KEYBIT, sys::BTN_TOUCH as i32)?;
-
-        for keycode in 1..=255 {
-            ioctl_set(raw_fd, sys::UI_SET_KEYBIT, keycode)?;
-        }
-
-        ioctl_set(raw_fd, sys::UI_SET_RELBIT, sys::REL_X as i32)?;
-        ioctl_set(raw_fd, sys::UI_SET_RELBIT, sys::REL_Y as i32)?;
-
-        ioctl_set(raw_fd, sys::UI_SET_ABSBIT, sys::ABS_X as i32)?;
-        ioctl_set(raw_fd, sys::UI_SET_ABSBIT, sys::ABS_Y as i32)?;
-
-        let dev = sys::uinput_user_dev {
-            name: {
-                let mut n = [0u8; sys::UINPUT_MAX_NAME_SIZE];
-                let name = b"nexus-virtual-input\0";
-                let len = name.len().min(sys::UINPUT_MAX_NAME_SIZE);
-                n[..len].copy_from_slice(&name[..len]);
-                n
-            },
-            id: libc::input_id {
-                bustype: sys::BUS_USB,
-                vendor: 0x1,
-                product: 0x1,
-                version: 0x1,
-            },
-            ff_effects_max: 0,
-            absmax: {
-                let mut a = [-1i32; 64];
-                a[sys::ABS_X as usize] = sys::ABS_MAX_X;
-                a[sys::ABS_Y as usize] = sys::ABS_MAX_Y;
-                a
-            },
-            absmin: [0i32; 64],
-            absfuzz: [0i32; 64],
-            absflat: [0i32; 64],
-        };
-
-        let dev_bytes = unsafe {
-            std::slice::from_raw_parts(
-                &dev as *const sys::uinput_user_dev as *const u8,
-                std::mem::size_of::<sys::uinput_user_dev>(),
-            )
-        };
-
-        unsafe {
-            libc::write(
-                raw_fd,
-                dev_bytes.as_ptr() as *const libc::c_void,
-                dev_bytes.len(),
-            );
-        }
-
-        ioctl_set(raw_fd, sys::UI_DEV_CREATE, 0)?;
-
-        tracing::info!("input injector: /dev/uinput accessible, virtual device created");
         Ok(Self { fd })
     }
 
     pub fn inject(&mut self, event: &InputEvent) -> Result<()> {
+        if self.fd.is_none() {
+            return Ok(());
+        }
         match event.event_type {
             t if t == InputEventType::Keyboard as i32 => {
                 let code = event.key_code as u16;
@@ -248,7 +250,7 @@ impl Injector {
                 std::mem::size_of::<sys::input_event>(),
             )
         };
-        let raw_fd = self.fd.as_raw_fd();
+        let raw_fd = self.fd.as_ref().unwrap().as_raw_fd();
         let written =
             unsafe { libc::write(raw_fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
         if written < 0 {
@@ -303,18 +305,24 @@ mod tests {
     fn t4_uinput_error_on_missing_device() {
         #[cfg(target_os = "linux")]
         {
+            let mut injector = Injector::new().unwrap();
             let has_uinput = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open("/dev/uinput")
                 .is_ok();
+            // When /dev/uinput is not accessible, inject should still be a no-op.
+            let event = InputEvent {
+                event_type: InputEventType::Keyboard as i32,
+                action: InputAction::Press as i32,
+                key_code: 42,
+                x: 0,
+                y: 0,
+                button: 0,
+            };
+            assert!(injector.inject(&event).is_ok(), "inject must not fail even when uinput is missing");
             if !has_uinput {
-                let err = Injector::new().unwrap_err();
-                let msg = format!("{err:#}");
-                assert!(
-                    msg.contains("/dev/uinput"),
-                    "error should mention /dev/uinput: {msg}"
-                );
+                assert!(injector.fd.is_none(), "fd should be None when uinput is missing");
             }
         }
     }

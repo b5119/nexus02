@@ -46,7 +46,7 @@ enum Command {
 
     /// Pair with a remote host using a 6-digit code (ADR 0013)
     Pair {
-        /// Address of the host to pair with (IP or hostname, no port — uses 50052).
+        /// Address of the host to pair with (IP, hostname, or full URL; port defaults to 50052).
         #[arg(long)]
         host: String,
 
@@ -241,7 +241,15 @@ async fn main() -> Result<()> {
                 host_device_id.to_string(),
             )?;
 
-            println!("To mount, run: NEXUS_TRUSTED_HOST_ID={host_id} nexus-mount mount --remote https://{host}:50051 --mountpoint <dir> --trusted");
+            // Strip any existing port from `host` so the hint URL does not end
+            // up with a duplicate port (e.g. "https://127.0.0.1:50052:50051").
+            let host_part = host
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .rsplit_once(':')
+                .map(|(h, _)| h)
+                .unwrap_or(host.trim_start_matches("http://").trim_start_matches("https://"));
+            println!("To mount, run: NEXUS_TRUSTED_HOST_ID={host_id} nexus-mount mount --remote https://{host_part}:50051 --mountpoint <dir> --trusted");
 
             Ok(())
         }

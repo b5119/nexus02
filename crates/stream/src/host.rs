@@ -6,14 +6,14 @@ use tonic::{Request, Response, Status};
 
 use nexus_proto::stream::v1::{stream_service_server::StreamService, InputEvent, VideoFrame};
 
-use crate::capture::X11Capture;
+use crate::capture::ScreenCapture;
 use crate::encode::Encoder;
 use crate::inject::Injector;
 
 /// Stream host: captures the screen, encodes H.264, and serves
 /// the StreamService RPC to connected viewers.
 pub struct StreamHost {
-    capture: Arc<Mutex<X11Capture>>,
+    capture: Arc<Mutex<ScreenCapture>>,
     encoder: Arc<Mutex<Encoder>>,
     injector: Arc<Mutex<Injector>>,
 }
@@ -121,7 +121,7 @@ impl StreamService for StreamHostService {
 /// Start the stream host: initialize capture, encoder, and injector,
 /// then register the StreamService on the given tonic server builder.
 pub async fn run_stream_host(
-    capture: X11Capture,
+    capture: ScreenCapture,
     encoder: Encoder,
     injector: Injector,
 ) -> Result<StreamHost> {

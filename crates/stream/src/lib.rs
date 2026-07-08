@@ -1,3 +1,5 @@
+pub use nexus_proto;
+
 pub mod capture;
 pub mod decode;
 pub mod display;
