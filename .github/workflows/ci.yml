@@ -32,6 +32,7 @@ jobs:
       # libx11-dev, libxrandr-dev, libxcursor-dev, libxi-dev for nexus-stream (winit X11 backend);
       # libavcodec-dev, libavformat-dev, libavutil-dev, libswscale-dev, libx264-dev for
       #   nexus-stream/ffmpeg (H.264 encode);
+      # libpipewire-0.3-dev for nexus-stream/ffmpeg (PipeWire/Wayland capture);
       # xvfb for virtual X server (used by streaming e2e tests).
       - name: Install system dependencies
         run: |
@@ -40,6 +41,7 @@ jobs:
             protobuf-compiler libfuse3-dev pkg-config \
             libx11-dev libxrandr-dev libxcursor-dev libxi-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libx264-dev \
+            libpipewire-0.3-dev \
             xvfb
 
       - name: Install Rust toolchain
@@ -76,6 +78,7 @@ jobs:
             protobuf-compiler libfuse3-dev pkg-config \
             libx11-dev libxrandr-dev libxcursor-dev libxi-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libx264-dev \
+            libpipewire-0.3-dev \
             xvfb
 
       - name: Install Rust toolchain
