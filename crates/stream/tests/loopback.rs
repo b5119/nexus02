@@ -105,9 +105,7 @@ async fn t6_loopback_stream_synthetic_bgra_to_videoframe() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind should succeed");
-    let local_addr = listener
-        .local_addr()
-        .expect("local_addr should succeed");
+    let local_addr = listener.local_addr().expect("local_addr should succeed");
     let incoming = TcpListenerStream::new(listener);
 
     tokio::spawn(async move {
