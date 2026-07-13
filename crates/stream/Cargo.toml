@@ -1,0 +1,43 @@
+[package]
+name = "nexus-stream"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nexus-viewer"
+path = "src/main.rs"
+required-features = ["ffmpeg"]
+
+[features]
+default = []
+ffmpeg = ["ffmpeg-next", "ashpd", "pipewire"]
+
+[dependencies]
+nexus-common = { path = "../common" }
+nexus-proto = { path = "../proto" }
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+ffmpeg-next = { workspace = true, optional = true }
+ashpd = { workspace = true, features = ["screencast"], optional = true }
+pipewire = { workspace = true, features = ["v1_0_0"], optional = true }
+winit = { workspace = true, features = ["x11", "rwh_05"] }
+pixels.workspace = true
+tokio-stream.workspace = true
+futures-util.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11 = { version = "2.21", features = ["xlib"] }
+libc = "0.2"
+
+# ffmpeg-next >=7 requires the "avcodec-61" feature on newer ffmpeg 7.x.
+# Adjust the feature flag to match the system ffmpeg version.
+# Enable with: --features ffmpeg
+# ffmpeg-next = { workspace = true, features = ["avcodec-61"] }

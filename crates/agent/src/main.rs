@@ -35,6 +35,18 @@ enum Command {
         /// Hard cap per store (number of entries) before GC eviction.
         #[arg(long, default_value_t = 50_000)]
         max_store_entries: usize,
+
+        /// Enable screen streaming on the same server (X11 + uinput + FFmpeg required).
+        #[arg(long)]
+        enable_streaming: bool,
+
+        /// Capture frame rate when streaming (default 30).
+        #[arg(long, default_value_t = 30)]
+        fps: u32,
+
+        /// Encoding quality preset (low/medium/high).
+        #[arg(long, default_value = "medium")]
+        quality: String,
     },
 
     /// Start the pairing listener (port 50052, code-based device pairing)
@@ -84,6 +96,9 @@ async fn main() -> Result<()> {
             gc_interval_hours,
             tombstone_ttl_hours,
             max_store_entries,
+            enable_streaming,
+            fps,
+            quality,
         } => {
             let cfg = config::AgentConfig::load_or_create()?;
 
@@ -91,6 +106,7 @@ async fn main() -> Result<()> {
                 device_id = %cfg.device_id,
                 %serve_dir,
                 port,
+                enable_streaming,
                 "starting nexus-agent serve"
             );
 
@@ -102,6 +118,9 @@ async fn main() -> Result<()> {
                 gc_interval_hours,
                 tombstone_ttl_hours,
                 max_store_entries,
+                enable_streaming,
+                fps,
+                quality,
             )
             .await
         }
