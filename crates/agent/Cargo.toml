@@ -7,6 +7,10 @@ edition = "2021"
 name = "nexus-agent"
 path = "src/main.rs"
 
+[lib]
+name = "nexus_agent"
+path = "src/lib.rs"
+
 [dependencies]
 nexus-common = { path = "../common" }
 nexus-proto = { path = "../proto" }
@@ -31,11 +35,19 @@ rcgen = { version = "0.13", features = ["x509-parser"] }
 rustls-pki-types = "1"
 # PEM-to-DER parsing for cert fingerprint verification in the mTLS interceptor.
 rustls-pemfile = "2"
+mdns-sd.workspace = true
+rustls = "0.23"
+rustls-webpki = "0.103"
+tokio-rustls = "0.26"
 subtle.workspace = true
 rand.workspace = true
 
+[features]
+mdns_test = []
+
 [dev-dependencies]
 tempfile = "3"
+sha2 = "0.10"
 
 # android-specific dependency: lets the agent integrate with Android's
 # logging system (logcat) instead of trying to write to stdout, which

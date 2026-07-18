@@ -32,6 +32,7 @@ pixels.workspace = true
 tokio-stream.workspace = true
 futures-util.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
+mdns-sd.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11 = { version = "2.21", features = ["xlib"] }

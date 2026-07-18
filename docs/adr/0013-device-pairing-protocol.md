@@ -306,6 +306,8 @@ nexus-mount mount --remote <address> --mountpoint <dir>
 
 **Known limitation:** The `ServerTlsConfig::client_ca_root()` API in tonic 0.12.x (and 0.14.x) accepts a static `Certificate` bundle. There is no public API to hot-reload the trust anchor store without rebuilding the TLS acceptor. A future enhancement should implement dynamic reload by wrapping the TLS acceptor with a custom `Connected` implementation that can be updated at runtime.
 
+**Known gap — TLS-layer certificate rejection:** The custom `ClientCertVerifier` in `custom_tls.rs` accepts any client certificate at the TLS layer and defers identity verification to the application-layer interceptor. The intended approach for TLS-layer rejection (using a custom `ClientCertVerifier` that knows the peer store) is blocked because `tonic::transport::Error` is `pub(crate)` in tonic 0.12. The implementation in `custom_tls.rs` is correct and ready to wire in once tonic upgrades to a version with a public `Error` type. Tracked in issue #15 (tonic upgrade).
+
 **Issue:** Support dynamic peer CA store reload without agent restart — tracked in GitHub issue #TBD.
 
 ## Consequences

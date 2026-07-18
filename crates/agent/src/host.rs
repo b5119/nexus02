@@ -16,12 +16,12 @@
 use anyhow::Result;
 use nexus_common::{ClockOrder, ClockStore, TombstoneStore, VectorClock};
 use nexus_proto::fs::v1::{
-    delete_file_response,
+    delete_file_response, mkdir_file_response,
     file_service_server::{FileService, FileServiceServer},
     rename_file_response, write_file_response, DeleteFileRequest, DeleteFileResponse, FileEntry,
-    ListDirRequest, ListDirResponse, ReadFileChunk, ReadFileRequest, RenameFileRequest,
-    RenameFileResponse, StatRequest, StatResponse, WriteFileChunk, WriteFileRequest,
-    WriteFileResponse,
+    ListDirRequest, ListDirResponse, MkdirFileRequest, MkdirFileResponse, ReadFileChunk,
+    ReadFileRequest, RenameFileRequest, RenameFileResponse, StatRequest, StatResponse,
+    WriteFileChunk, WriteFileRequest, WriteFileResponse,
 };
 use nexus_proto::stream::v1::stream_service_server::StreamServiceServer;
 use rustls_pki_types::CertificateDer;
@@ -187,6 +187,22 @@ impl FileServiceImpl {
         }
         Ok(canonical)
     }
+
+    /// Ensures the parent directory of a path exists if it was tombstoned.
+    /// Called before resolve_for_write to prevent "parent directory not found" errors
+    /// when writing into a previously-deleted directory (ADR 0016).
+    fn ensure_parent_not_tombstoned(&self, path: &str) -> Result<(), Status> {
+        let parent = Path::new(path).parent().map(|p| p.to_string_lossy().into_owned());
+        if let Some(parent) = parent {
+            let parent_key = Self::clock_key(&parent);
+            if !self.tombstones.get(&parent_key).0.is_empty() {
+                let parent_path = self.root.join(&parent_key);
+                std::fs::create_dir_all(&parent_path)
+                    .map_err(|e| Status::internal(format!("recreating parent directory: {e}")))?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -331,6 +347,10 @@ impl FileService for FileServiceImpl {
             req.writer_device_id.clone()
         };
 
+        // If the parent directory was tombstoned, recreate it before writing
+        // (ADR 0016 — write-into-deleted-directory).
+        self.ensure_parent_not_tombstoned(&req.path)?;
+
         // Serialize the whole compare-and-apply so two concurrent writes to the
         // same path can't race on the conflict decision (ADR 0005).
         let _guard = self.write_lock.lock().await;
@@ -469,6 +489,10 @@ impl FileService for FileServiceImpl {
         if key.is_empty() {
             return Err(Status::invalid_argument("cannot write the root path"));
         }
+
+        // If the parent directory was tombstoned, recreate it before writing
+        // (ADR 0016 — write-into-deleted-directory).
+        self.ensure_parent_not_tombstoned(&path)?;
 
         // Write chunks to a temp file. Using UUID for uniqueness so concurrent
         // streams to the same path don't collide. TempFile's Drop ensures cleanup
@@ -799,6 +823,133 @@ impl FileService for FileServiceImpl {
             }
         }
     }
+
+    async fn mkdir_file(
+        &self,
+        request: Request<MkdirFileRequest>,
+    ) -> Result<Response<MkdirFileResponse>, Status> {
+        let req = request.into_inner();
+        let key = Self::clock_key(&req.path);
+        if key.is_empty() {
+            return Err(Status::invalid_argument("cannot mkdir the root path"));
+        }
+        let incoming = clock_from_proto(&req.clock);
+        let writer = if req.writer_device_id.is_empty() {
+            "unknown".to_string()
+        } else {
+            sanitize_device_id(&req.writer_device_id)
+        };
+
+        let _guard = self.write_lock.lock().await;
+
+        let dest = self.resolve_for_write(&req.path)?;
+
+        // If the path already exists as a file, rename it out of the way.
+        if dest.exists() && dest.is_file() {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let conflict_rel = format!("{key}.conflict-{writer}-{ts}");
+            let conflict_dest = self.resolve_for_write(&conflict_rel)?;
+            tokio::fs::rename(&dest, &conflict_dest)
+                .await
+                .map_err(|e| Status::internal(format!("rename file conflict: {e}")))?;
+            // Move clock entry
+            if let Some(entry) = self.clocks.entries().into_iter().find(|(k, _)| k == &key) {
+                self.clocks.remove(&key).ok();
+                self.clocks.put(&conflict_rel, entry.1.clock).ok();
+            }
+            tokio::fs::create_dir(&dest)
+                .await
+                .map_err(|e| Status::internal(format!("mkdir failed: {e}")))?;
+            self.clocks
+                .put(&key, incoming)
+                .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
+            return Ok(Response::new(MkdirFileResponse {
+                result: mkdir_file_response::Result::Applied as i32,
+                clock: Some(clock_to_proto(&self.clocks.get(&key))),
+                conflict_path: conflict_rel,
+            }));
+        }
+
+        // If the path already exists as a directory, check for concurrent mkdir.
+        if dest.exists() && dest.is_dir() {
+            let stored = self.clocks.get(&key);
+            if stored.0.is_empty() {
+                // No clock entry — first mkdir is being shadowed by an existing dir.
+                // Just record the clock and succeed.
+                self.clocks
+                    .put(&key, incoming)
+                    .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
+                return Ok(Response::new(MkdirFileResponse {
+                    result: mkdir_file_response::Result::Applied as i32,
+                    clock: Some(clock_to_proto(&self.clocks.get(&key))),
+                    conflict_path: String::new(),
+                }));
+            }
+            match incoming.compare(&stored) {
+                ClockOrder::Dominates | ClockOrder::Equal => {
+                    self.clocks
+                        .put(&key, incoming)
+                        .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
+                    Ok(Response::new(MkdirFileResponse {
+                        result: mkdir_file_response::Result::Applied as i32,
+                        clock: Some(clock_to_proto(&self.clocks.get(&key))),
+                        conflict_path: String::new(),
+                    }))
+                }
+                ClockOrder::DominatedBy => {
+                    tracing::warn!(path = %req.path, "ignoring stale mkdir");
+                    Ok(Response::new(MkdirFileResponse {
+                        result: mkdir_file_response::Result::Stale as i32,
+                        clock: Some(clock_to_proto(&stored)),
+                        conflict_path: String::new(),
+                    }))
+                }
+                ClockOrder::Concurrent => {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let conflict_rel = format!("{key}.conflict-{writer}-{ts}");
+                    let conflict_dest = self.resolve_for_write(&conflict_rel)?;
+                    tokio::fs::rename(&dest, &conflict_dest)
+                        .await
+                        .map_err(|e| Status::internal(format!("rename conflict: {e}")))?;
+                    tokio::fs::create_dir(&dest)
+                        .await
+                        .map_err(|e| Status::internal(format!("mkdir failed: {e}")))?;
+                    self.clocks
+                        .put(&key, incoming)
+                        .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
+                    tracing::warn!(
+                        path = %req.path,
+                        conflict = %conflict_rel,
+                        "concurrent mkdir detected — existing directory renamed"
+                    );
+                    Ok(Response::new(MkdirFileResponse {
+                        result: mkdir_file_response::Result::Conflict as i32,
+                        clock: Some(clock_to_proto(&self.clocks.get(&key))),
+                        conflict_path: conflict_rel,
+                    }))
+                }
+            }
+        } else {
+            // Path does not exist — fresh mkdir.
+            tokio::fs::create_dir(&dest)
+                .await
+                .map_err(|e| Status::internal(format!("mkdir failed: {e}")))?;
+            self.clocks
+                .put(&key, incoming)
+                .map_err(|e| Status::internal(format!("persisting clock failed: {e}")))?;
+            Ok(Response::new(MkdirFileResponse {
+                result: mkdir_file_response::Result::Applied as i32,
+                clock: Some(clock_to_proto(&self.clocks.get(&key))),
+                conflict_path: String::new(),
+            }))
+        }
+    }
 }
 
 fn clock_to_proto(c: &VectorClock) -> nexus_proto::fs::v1::VectorClock {
@@ -976,6 +1127,7 @@ pub async fn run(
     port: u16,
     auth_token: String,
     device_id: nexus_common::DeviceId,
+    display_name: String,
     gc_interval_hours: u64,
     tombstone_ttl_hours: u64,
     max_store_entries: usize,
@@ -983,6 +1135,9 @@ pub async fn run(
     fps: u32,
     quality: String,
 ) -> Result<()> {
+    // Install the ring crypto provider for rustls (required in 0.23.41+).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let root = PathBuf::from(&serve_dir)
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(&serve_dir));
@@ -1027,6 +1182,24 @@ pub async fn run(
         Err(e) => {
             tracing::warn!(error = %e, "peers.json unavailable; mTLS disabled");
             Arc::new(crate::pairing::PeersStore::empty())
+        }
+    };
+
+    // Register mDNS service so other devices can discover this agent.
+    // Held for the lifetime of the server; deregisters on drop.
+    let _discovery = match crate::discovery::DiscoveryService::register(
+        &device_id,
+        port,
+        &display_name,
+        &peers_store,
+    ) {
+        Ok(svc) => {
+            tracing::info!("mDNS discovery service registered");
+            Some(svc)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to register mDNS discovery service");
+            None
         }
     };
 
@@ -1192,6 +1365,18 @@ mod tests {
 
     fn delete_req(path: &str, clock: &[(&str, u64)], writer: &str) -> Request<DeleteFileRequest> {
         Request::new(DeleteFileRequest {
+            path: path.to_string(),
+            clock: pclock(clock),
+            writer_device_id: writer.to_string(),
+        })
+    }
+
+    fn mkdir_req(
+        path: &str,
+        clock: &[(&str, u64)],
+        writer: &str,
+    ) -> Request<MkdirFileRequest> {
+        Request::new(MkdirFileRequest {
             path: path.to_string(),
             clock: pclock(clock),
             writer_device_id: writer.to_string(),
@@ -1892,6 +2077,9 @@ mod tests {
 
     #[tokio::test]
     async fn t11_mtls_integration() {
+        // Install the ring crypto provider for rustls (required in 0.23.41+).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let tmp = tempfile::tempdir().unwrap();
         let serve_dir = tmp.path().join("serve");
         std::fs::create_dir_all(&serve_dir).unwrap();
@@ -2111,6 +2299,249 @@ mod tests {
             stat.is_ok(),
             "case (c): stat with valid token should succeed"
         );
+
+        // Clean shutdown.
+        shutdown_tx.send(()).unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    // ── ADR 0016: Directory conflict detection ────────────────────────────
+
+    #[tokio::test]
+    async fn t6_concurrent_mkdir_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+
+        // Create the parent dir first.
+        std::fs::create_dir(dir.path().join("shared")).unwrap();
+
+        // Dev A creates a directory.
+        let r1 = s
+            .mkdir_file(mkdir_req("shared/foo", &[("dev-a", 1)], "dev-a"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r1.result, mkdir_file_response::Result::Applied as i32);
+        assert!(dir.path().join("shared/foo").is_dir());
+
+        // Dev B concurrently creates the same path — conflict.
+        let r2 = s
+            .mkdir_file(mkdir_req("shared/foo", &[("dev-b", 1)], "dev-b"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r2.result, mkdir_file_response::Result::Conflict as i32);
+        assert!(!r2.conflict_path.is_empty(), "conflict_path must be set");
+        assert!(
+            r2.conflict_path.contains(".conflict-dev-b-"),
+            "unexpected conflict name: {}",
+            r2.conflict_path
+        );
+
+        // The original path still exists (dev-b's version won), and conflict
+        // copy preserves dev-a's version.
+        assert!(dir.path().join("shared/foo").is_dir());
+        assert!(
+            dir.path().join(&r2.conflict_path).is_dir(),
+            "conflict copy must exist: {}",
+            r2.conflict_path
+        );
+    }
+
+    #[tokio::test]
+    async fn t6_write_into_deleted_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+
+        // Create a file inside a subdirectory.
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        s.write_file(write_req("work/report.txt", b"report", &[("dev-a", 1)], "dev-a"))
+            .await
+            .unwrap();
+
+        // Tombstone the parent directory and remove it from disk (simulates
+        // a remote delete that created a tombstone for "work").
+        s.tombstones.put("work", clock(&[("dev-a", 2)])).unwrap();
+        std::fs::remove_dir_all(dir.path().join("work")).unwrap();
+
+        // Write a new file under the tombstoned parent — should recreate
+        // the directory transparently (write wins, ADR 0016).
+        let resp = s
+            .write_file(write_req("work/new.txt", b"new data", &[("dev-a", 3)], "dev-a"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.result, write_file_response::Result::Applied as i32);
+
+        // Directory was recreated, file exists.
+        assert!(dir.path().join("work").is_dir());
+        assert_eq!(
+            std::fs::read(dir.path().join("work/new.txt")).unwrap(),
+            b"new data"
+        );
+        // Tombstone is NOT removed (it remains as a record of the deletion).
+        assert!(
+            !s.tombstones.get("work").0.is_empty(),
+            "parent tombstone must remain"
+        );
+    }
+
+    // ── #29: Large file streaming write integration test ──────────────────
+
+    #[tokio::test]
+    async fn t29_large_file_streaming_write_integration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let serve_dir = tmp.path().join("serve");
+        std::fs::create_dir_all(&serve_dir).unwrap();
+
+        // Generate 5 MB of deterministic data.
+        let data_size = 5 * 1024 * 1024;
+        let data: Vec<u8> = (0..data_size).map(|i| (i % 256) as u8).collect();
+
+        // Compute expected sha256.
+        let expected_hash = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            format!("{:x}", hasher.finalize())
+        };
+
+        // Bind a TCP listener before spawning the server so the port is
+        // reserved atomically — eliminates the TOCTOU race between probing
+        // for a free port and the server binding it.
+        let std_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("binding test listener");
+        std_listener
+            .set_nonblocking(true)
+            .expect("setting non-blocking");
+        let port = std_listener
+            .local_addr()
+            .expect("getting local addr")
+            .port();
+        let tokio_listener =
+            tokio::net::TcpListener::from_std(std_listener).expect("converting to tokio listener");
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(tokio_listener);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let svc = svc(&serve_dir);
+
+        let server_handle = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(FileServiceServer::new(svc))
+                .serve_with_incoming_shutdown(incoming, async {
+                    shutdown_rx.await.ok();
+                })
+                .await
+        });
+
+        let server_addr = format!("http://127.0.0.1:{port}");
+
+        use nexus_proto::fs::v1::file_service_client::FileServiceClient;
+        use tonic::transport::Channel;
+
+        let channel = Channel::from_shared(server_addr)
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = FileServiceClient::new(channel);
+
+        // Stream 5 MB through WriteFileStream.
+        let chunk_size: usize = 64 * 1024;
+        let (tx, rx) = tokio::sync::mpsc::channel::<WriteFileChunk>(100);
+        let mut sent_chunks = 0u64;
+        let mut offset = 0usize;
+
+        // First chunk carries metadata.
+        let end = std::cmp::min(offset + chunk_size, data.len());
+        tx.send(WriteFileChunk {
+            path: "large.bin".to_string(),
+            clock: Some(nexus_proto::fs::v1::VectorClock {
+                counters: [("test-device".to_string(), 1)].into_iter().collect(),
+            }),
+            writer_device_id: "test-device".to_string(),
+            data: data[offset..end].to_vec(),
+        })
+        .await
+        .unwrap();
+        sent_chunks += 1;
+        offset = end;
+
+        while offset < data.len() {
+            let end = std::cmp::min(offset + chunk_size, data.len());
+            tx.send(WriteFileChunk {
+                path: String::new(),
+                clock: None,
+                writer_device_id: String::new(),
+                data: data[offset..end].to_vec(),
+            })
+            .await
+            .unwrap();
+            sent_chunks += 1;
+            offset = end;
+        }
+        drop(tx);
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let resp = client
+            .write_file_stream(tonic::Request::new(stream))
+            .await
+            .unwrap();
+        let inner = resp.into_inner();
+
+        // Verify response.
+        assert_eq!(inner.result, write_file_response::Result::Applied as i32);
+        assert!(
+            sent_chunks >= 80,
+            "expected at least 80 chunks (5 MB / 64 KB), got {sent_chunks}"
+        );
+        assert_eq!(
+            inner
+                .clock
+                .as_ref()
+                .unwrap()
+                .counters
+                .get("test-device")
+                .copied()
+                .unwrap_or(0),
+            1,
+            "clock must show 1 write session for test-device"
+        );
+
+        // Verify sha256 of written file matches original.
+        let written = std::fs::read(serve_dir.join("large.bin")).unwrap();
+        let written_hash = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&written);
+            format!("{:x}", hasher.finalize())
+        };
+        assert_eq!(
+            written_hash, expected_hash,
+            "sha256 mismatch between source data and written file"
+        );
+
+        // Round-trip: read back via ReadFile RPC and verify identical bytes.
+        let mut read_stream = client
+            .read_file(tonic::Request::new(ReadFileRequest {
+                path: "large.bin".to_string(),
+                offset: 0,
+                length: data_size as u64,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mut read_back = Vec::new();
+        while let Some(chunk) = read_stream.message().await.unwrap() {
+            read_back.extend_from_slice(&chunk.data);
+        }
+        assert_eq!(
+            read_back.len(),
+            data.len(),
+            "round-trip length mismatch"
+        );
+        assert_eq!(read_back, data, "round-trip content mismatch");
 
         // Clean shutdown.
         shutdown_tx.send(()).unwrap();
