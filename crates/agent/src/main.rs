@@ -1,4 +1,5 @@
 mod config;
+mod discovery;
 mod host;
 mod pairing;
 
@@ -47,6 +48,10 @@ enum Command {
         /// Encoding quality preset (low/medium/high).
         #[arg(long, default_value = "medium")]
         quality: String,
+
+        /// Human-readable display name for mDNS discovery (default: hostname).
+        #[arg(long, default_value = "")]
+        display_name: String,
     },
 
     /// Start the pairing listener (port 50052, code-based device pairing)
@@ -62,6 +67,22 @@ enum Command {
 
     /// List all paired devices from peers.json
     ListPeers,
+
+    /// Discover nexus agents on the LAN via mDNS
+    Discover {
+        /// How long to scan for (seconds).
+        #[arg(long, default_value_t = 10)]
+        timeout_secs: u64,
+    },
+}
+
+fn hostname() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| {
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|_| "nexus-device".to_string())
 }
 
 fn init_logging() {
@@ -99,14 +120,22 @@ async fn main() -> Result<()> {
             enable_streaming,
             fps,
             quality,
+            display_name,
         } => {
             let cfg = config::AgentConfig::load_or_create()?;
+
+            let display_name = if display_name.is_empty() {
+                hostname()
+            } else {
+                display_name
+            };
 
             tracing::info!(
                 device_id = %cfg.device_id,
                 %serve_dir,
                 port,
                 enable_streaming,
+                %display_name,
                 "starting nexus-agent serve"
             );
 
@@ -115,6 +144,7 @@ async fn main() -> Result<()> {
                 port,
                 cfg.auth_token,
                 cfg.device_id,
+                display_name,
                 gc_interval_hours,
                 tombstone_ttl_hours,
                 max_store_entries,
@@ -148,6 +178,13 @@ async fn main() -> Result<()> {
                     entry.display_name, entry.paired_at
                 );
             }
+            Ok(())
+        }
+
+        Command::Discover { timeout_secs } => {
+            tracing::info!(timeout_secs, "scanning LAN for nexus agents via mDNS");
+            let services = discovery::discover(timeout_secs)?;
+            discovery::print_discover_table(&services);
             Ok(())
         }
     }

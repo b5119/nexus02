@@ -35,6 +35,11 @@ service FileService {
   // path. Preserves vector clock history (inode identity unchanged) — see ADR 0009.
   // Detects rename-vs-edit/delete conflicts.
   rpc RenameFile (RenameFileRequest) returns (RenameFileResponse);
+
+  // Create a directory. The directory is tracked in the clock store so that
+  // concurrent mkdir from different devices is detected as a conflict.
+  // See ADR 0016.
+  rpc MkdirFile (MkdirFileRequest) returns (MkdirFileResponse);
 }
 
 message ListDirRequest {
@@ -180,5 +185,31 @@ message RenameFileResponse {
   VectorClock clock = 2;
   // Relative path of the conflict copy. Set only for CONFLICT (rename-vs-edit);
   // empty for rename-vs-delete CONFLICT (mirrors DeleteFile ADR 0008).
+  string conflict_path = 3;
+}
+
+message MkdirFileRequest {
+  string path = 1;
+  // The creator's clock for this path AFTER incrementing its own counter.
+  VectorClock clock = 2;
+  // Which device is creating this directory.
+  string writer_device_id = 3;
+}
+
+message MkdirFileResponse {
+  enum Result {
+    // Directory created successfully.
+    APPLIED = 0;
+    // Concurrent mkdir conflict — existing directory renamed to
+    // <path>.conflict-<device>-<timestamp>, new directory created.
+    CONFLICT = 1;
+    // Stale request (clock is dominated by existing entry).
+    STALE = 2;
+  }
+  Result result = 1;
+  // The authoritative clock for `path` after this operation.
+  VectorClock clock = 2;
+  // Relative path of the conflict copy. Set for CONFLICT (concurrent mkdir)
+  // and for file-vs-directory conflicts where result is APPLIED.
   string conflict_path = 3;
 }
