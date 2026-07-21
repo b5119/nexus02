@@ -61,7 +61,7 @@ Alternatives considered:
 
 **Decision:** The service registration lives in a `DiscoveryService` struct that starts registration in its constructor and stops it on drop (RAII).
 
-When `nexus-agent serve` starts, it creates a `DiscoveryService` in a background tokio task. On agent shutdown, the task is cancelled, the struct is dropped, and the mDNS registration is torn down automatically.
+When `nexus-agent serve` starts, it creates a `DiscoveryService` directly in `host::run` (not in a background tokio task). On agent shutdown, the struct is dropped and the mDNS registration is torn down automatically.
 
 The service is **host-only** — viewer and mount do not register themselves on the LAN.
 
@@ -75,7 +75,7 @@ device_id                          | display_name         | address         | po
 f1e2d3c4-b5a6-7c8d-9e0f-1a2b3c4d5e6f | Office Desktop      | 192.168.1.100   | 50051 | no
 ```
 
-The "paired?" column is determined by checking if the discovered device_id exists in this machine's `trusted-certs.json`.
+The "paired?" column is determined by checking if the discovered device_id exists in this machine's `PeersStore`.
 
 ### 7. Client `--discover` Flag
 

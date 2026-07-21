@@ -844,8 +844,19 @@ impl FileService for FileServiceImpl {
 
         let dest = self.resolve_for_write(&req.path)?;
 
-        // If the path already exists as a file, rename it out of the way.
+        // If the path already exists as a file, check clock then rename it out of the way.
         if dest.exists() && dest.is_file() {
+            let stored = self.clocks.get(&key);
+            if !stored.0.is_empty()
+                && incoming.compare(&stored) == ClockOrder::DominatedBy
+            {
+                tracing::warn!(path = %req.path, "ignoring stale mkdir (file-in-the-way)");
+                return Ok(Response::new(MkdirFileResponse {
+                    result: mkdir_file_response::Result::Stale as i32,
+                    clock: Some(clock_to_proto(&stored)),
+                    conflict_path: String::new(),
+                }));
+            }
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -917,6 +928,35 @@ impl FileService for FileServiceImpl {
                     tokio::fs::rename(&dest, &conflict_dest)
                         .await
                         .map_err(|e| Status::internal(format!("rename conflict: {e}")))?;
+                    // Remap clocks for the subtree under the renamed directory.
+                    let prefix = format!("{key}/");
+                    let conflict_prefix = format!("{conflict_rel}/");
+                    for (k, entry) in self.clocks.entries() {
+                        if k.starts_with(&prefix) {
+                            let new_key = format!("{conflict_prefix}{}", &k[prefix.len()..]);
+                            self.clocks.remove(&k).ok();
+                            self.clocks.put(&new_key, entry.clock).ok();
+                        }
+                    }
+                    // Remap tombstones for the subtree under the renamed directory.
+                    for (k, entry) in self.tombstones.entries() {
+                        if k.starts_with(&prefix) {
+                            let new_key = format!("{conflict_prefix}{}", &k[prefix.len()..]);
+                            self.tombstones.remove(&k).ok();
+                            self.tombstones.put(&new_key, entry.clock).ok();
+                        }
+                    }
+                    // Move the directory's own clock entry.
+                    if let Some(entry) = self.clocks.entries().into_iter().find(|(k, _)| k == &key) {
+                        self.clocks.remove(&key).ok();
+                        self.clocks.put(&conflict_rel, entry.1.clock).ok();
+                    }
+                    // Move the directory's own tombstone entry.
+                    if let Some(entry) = self.tombstones.entries().into_iter().find(|(k, _)| k == &key) {
+                        self.tombstones.remove(&key).ok();
+                        self.tombstones.put(&conflict_rel, entry.1.clock).ok();
+                    }
+                    // Recreate the directory at the original path (incoming wins).
                     tokio::fs::create_dir(&dest)
                         .await
                         .map_err(|e| Status::internal(format!("mkdir failed: {e}")))?;
@@ -936,7 +976,18 @@ impl FileService for FileServiceImpl {
                 }
             }
         } else {
-            // Path does not exist — fresh mkdir.
+            // Path does not exist — check tombstone before fresh mkdir.
+            let tombstone = self.tombstones.get(&key);
+            if !tombstone.0.is_empty()
+                && incoming.compare(&tombstone) == ClockOrder::DominatedBy
+            {
+                tracing::warn!(path = %req.path, "ignoring stale mkdir (parent tombstoned)");
+                return Ok(Response::new(MkdirFileResponse {
+                    result: mkdir_file_response::Result::Stale as i32,
+                    clock: Some(clock_to_proto(&incoming)),
+                    conflict_path: String::new(),
+                }));
+            }
             tokio::fs::create_dir(&dest)
                 .await
                 .map_err(|e| Status::internal(format!("mkdir failed: {e}")))?;

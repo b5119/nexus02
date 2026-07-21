@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -76,14 +77,19 @@ async fn main() -> Result<()> {
             .and_then(|v| v.as_object())
             .ok_or_else(|| anyhow::anyhow!("malformed trusted-certs.json: missing 'hosts' key"))?;
 
-        let device_id = match (args.host_id.as_ref(), hosts.len()) {
-            (Some(id), _) => id.clone(),
-            (None, 1) => {
-                let id = hosts.keys().expect("hosts.len() == 1").clone();
+        let device_id = match args.host_id.as_deref() {
+            Some(hid) => {
+                if !hosts.contains_key(*hid) {
+                    anyhow::bail!("Host ID {hid} not found among paired devices");
+                }
+                hid.to_string()
+            }
+            None if hosts.len() == 1 => {
+                let id = hosts.keys().next().expect("hosts.len() == 1").clone();
                 tracing::info!("Using paired host: {id}");
                 id
             }
-            (None, n) if n > 1 => {
+            None if hosts.len() > 1 => {
                 let keys: Vec<_> = hosts.keys().map(|k| format!("  {k}")).collect();
                 anyhow::bail!(
                     "Multiple paired hosts found:\n{}\nUse --host-id <device_id> to specify which one.",
@@ -170,10 +176,10 @@ async fn resolve_via_mdns_viewer(
                 let addr = info
                     .get_addresses()
                     .iter()
-                    .next()
                     .copied()
-                    .unwrap_or_else(|| std::net::Ipv4Addr::new(0, 0, 0, 0).into());
-                discovered.push((device_id, addr.to_string(), info.get_port()));
+                    .find(|a| !a.is_unspecified())
+                    .ok_or_else(|| anyhow::anyhow!("no usable address for mDNS service"))?;
+                discovered.push((device_id, addr, info.get_port()));
             }
             Ok(_) => {}
             Err(_) if std::time::Instant::now() < deadline => {}
@@ -203,16 +209,19 @@ async fn resolve_via_mdns_viewer(
         anyhow::bail!("No paired nexus devices found on the LAN. Pair first with `nexus-mount pair`.");
     }
 
-    let (chosen_id, addr, port) = match (paired.len(), host_id) {
-        (1, _) => paired.into_iter().next().unwrap(),
-        (_, Some(hid)) => paired
+    let (chosen_id, addr, port) = match args.host_id.as_deref() {
+        Some(hid) => paired
             .into_iter()
             .find(|(id, _, _)| id == hid)
             .ok_or_else(|| anyhow::anyhow!("Host ID {hid} not found among discovered paired devices"))?,
-        (_n, None) => {
+        None if paired.len() == 1 => paired.into_iter().next().unwrap(),
+        _ => {
             let list: String = paired
                 .iter()
-                .map(|(id, addr, port)| format!("  {id}  https://{addr}:{port}"))
+                .map(|(id, addr, port)| {
+                    let sa = SocketAddr::new(*addr, *port);
+                    format!("  {id}  https://{sa}")
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             anyhow::bail!("Multiple paired hosts discovered. Use --host-id to select one:\n{list}");
@@ -231,73 +240,10 @@ async fn resolve_via_mdns_viewer(
     let client_key = std::fs::read_to_string(cfg_dir.join("key.pem"))
         .with_context(|| format!("reading key.pem from {}", cfg_dir.display()))?;
 
-    let host_str = format!("https://{addr}:{port}");
+    let sa = SocketAddr::new(addr, port);
+    let host_str = format!("https://{sa}");
     tracing::info!(%host_str, chosen_id = %chosen_id, "resolved host via mDNS for viewer");
 
     Ok((host_str, chosen_id, cert, Some(client_cert), Some(client_key)))
 }
-        let raw = std::fs::read_to_string(&store_path)
-            .with_context(|| format!("reading {}", store_path.display()))?;
-        let parsed: serde_json::Value = serde_json::from_str(&raw)
-            .with_context(|| format!("parsing {}", store_path.display()))?;
-        let hosts = parsed
-            .get("hosts")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| anyhow::anyhow!("malformed trusted-certs.json: missing 'hosts' key"))?;
 
-        let device_id = match (args.host_id.as_ref(), hosts.len()) {
-            (Some(id), _) => id.clone(),
-            (None, 1) => {
-                let id = hosts.keys().next().expect("hosts.len() == 1").clone();
-                tracing::info!("Using paired host: {id}");
-                id
-            }
-            (None, n) if n > 1 => {
-                let keys: Vec<_> = hosts.keys().map(|k| format!("  {k}")).collect();
-                anyhow::bail!(
-                    "Multiple paired hosts found:\n{}\nUse --host-id <device_id> to specify which one.",
-                    keys.join("\n")
-                );
-            }
-            _ => anyhow::bail!("No paired hosts found. Run nexus-mount pair first."),
-        };
-
-        let cert = hosts
-            .get(&device_id)
-            .and_then(|e| e.get("cert_pem"))
-            .and_then(|c| c.as_str())
-            .map(|c| c.to_string());
-
-        // Load client identity cert+key for mTLS.
-        let cfg_dir = config_dir()?;
-        let client_cert = std::fs::read_to_string(cfg_dir.join("cert.pem"))
-            .with_context(|| format!("reading cert.pem from {}", cfg_dir.display()))?;
-        let client_key = std::fs::read_to_string(cfg_dir.join("key.pem"))
-            .with_context(|| format!("reading key.pem from {}", cfg_dir.display()))?;
-
-        (device_id, cert, Some(client_cert), Some(client_key))
-    } else {
-        ("remote".to_string(), None, None, None)
-    };
-
-    tracing::info!(
-        "nexus-viewer connecting to {} (trusted: {}, device_id: {})",
-        args.host,
-        args.trusted,
-        host_device_id
-    );
-
-    let mut viewer = StreamViewer::connect(
-        &args.host,
-        &host_device_id,
-        args.token.as_deref(),
-        ca_pem.as_deref(),
-        client_cert_pem.as_deref(),
-        client_key_pem.as_deref(),
-    )
-    .await?;
-
-    viewer.run().await?;
-
-    Ok(())
-}

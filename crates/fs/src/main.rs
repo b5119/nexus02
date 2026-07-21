@@ -3,6 +3,8 @@ mod filesystem;
 mod grpc_client;
 mod pairing;
 
+use std::net::SocketAddr;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
@@ -305,10 +307,10 @@ async fn resolve_via_mdns(
                 let addr = info
                     .get_addresses()
                     .iter()
-                    .next()
                     .copied()
-                    .unwrap_or_else(|| std::net::Ipv4Addr::new(0, 0, 0, 0).into());
-                discovered.push((device_id, addr.to_string(), info.get_port()));
+                    .find(|a| !a.is_unspecified())
+                    .ok_or_else(|| anyhow::anyhow!("no usable address for mDNS service"))?;
+                discovered.push((device_id, addr, info.get_port()));
             }
             Ok(_) => {}
             Err(_) if std::time::Instant::now() < deadline => {}
@@ -334,9 +336,8 @@ async fn resolve_via_mdns(
         );
     }
 
-    let (chosen_id, addr, port) = match (paired.len(), host_id) {
-        (1, _) => paired.into_iter().next().unwrap(),
-        (_, Some(hid)) => paired
+    let (chosen_id, addr, port) = match host_id {
+        Some(hid) => paired
             .into_iter()
             .find(|(id, _, _)| id == hid)
             .ok_or_else(|| {
@@ -344,10 +345,14 @@ async fn resolve_via_mdns(
                     "Host ID {hid} not found among discovered paired devices"
                 )
             })?,
-        (_n, None) => {
+        None if paired.len() == 1 => paired.into_iter().next().unwrap(),
+        _ => {
             let list: String = paired
                 .iter()
-                .map(|(id, addr, port)| format!("  {id}  https://{addr}:{port}"))
+                .map(|(id, addr, port)| {
+                    let sa = SocketAddr::new(*addr, *port);
+                    format!("  {id}  https://{sa}")
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             anyhow::bail!("Multiple paired hosts discovered. Use --host-id to select one:\n{list}");
@@ -366,7 +371,8 @@ async fn resolve_via_mdns(
     let cert_device_id = pairing::extract_device_id_from_cert_pem(&cert_pem)
         .context("extracting device ID from client cert")?;
 
-    let remote = format!("https://{addr}:{port}");
+    let sa = SocketAddr::new(addr, port);
+    let remote = format!("https://{sa}");
     tracing::info!(%remote, chosen_id = %chosen_id, "resolved host via mDNS");
 
     Ok((

@@ -10,6 +10,7 @@ use rustls::{
     DistinguishedName, Error, RootCertStore, ServerConfig, SignatureScheme,
 };
 use rustls_pki_types::{CertificateDer, UnixTime};
+use x509_cert::der::Decode;
 
 /// A `ClientCertVerifier` that accepts any client certificate at the TLS layer.
 ///
@@ -42,10 +43,23 @@ impl ClientCertVerifier for AcceptAllClientCertVerifier {
 
     fn verify_client_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
+        end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
-        _now: UnixTime,
+        now: UnixTime,
     ) -> Result<ClientCertVerified, Error> {
+        // Validate the certificate's validity period (notBefore/notAfter).
+        let x509 = x509_cert::Certificate::from_der(end_entity.as_ref())
+            .map_err(|_| Error::General("invalid client certificate".to_string()))?;
+        let validity = &x509.tbs_certificate.validity;
+        let not_before = validity.not_before.to_unix_duration().as_secs();
+        let not_after = validity.not_after.to_unix_duration().as_secs();
+        let now_secs = now.as_secs();
+        if now_secs < not_before {
+            return Err(Error::General("client certificate not yet valid".to_string()));
+        }
+        if now_secs > not_after {
+            return Err(Error::General("client certificate has expired".to_string()));
+        }
         Ok(ClientCertVerified::assertion())
     }
 

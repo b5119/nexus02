@@ -42,13 +42,14 @@ impl DiscoveryService {
             ("device_id", &device_id_str),
             ("nexus_version", "1"),
             ("paired", &paired_str),
+            ("display_name", display_name),
         ];
 
         let info = ServiceInfo::new(
             "_nexus._tcp.local.",
             &name,
             &hostname,
-            "0.0.0.0",
+            "",
             port,
             properties,
         )
@@ -108,8 +109,8 @@ pub fn discover(timeout_secs: u64) -> Result<Vec<DiscoveredService>> {
                     continue;
                 }
                 let display_name = info
-                    .get_hostname()
-                    .trim_end_matches(".local.")
+                    .get_property_val_str("display_name")
+                    .unwrap_or_default()
                     .to_string();
                 let is_paired = PeersStore::open()
                     .map(|store| {
@@ -197,9 +198,11 @@ mod tests {
     }
 
     fn make_peers_store() -> PeersStore {
-        let dir = std::env::temp_dir()
-            .join(format!("nexus-discovery-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = std::env::temp_dir().join(format!(
+            "nexus-discovery-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         PeersStore::open_in(&dir).unwrap()
     }

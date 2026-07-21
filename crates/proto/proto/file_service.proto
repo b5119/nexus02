@@ -209,6 +209,7 @@ message MkdirFileResponse {
   Result result = 1;
   // The authoritative clock for `path` after this operation.
   VectorClock clock = 2;
-  // Relative path of the conflict copy. Set only for CONFLICT.
+  // Relative path of the conflict copy. Set for CONFLICT (concurrent mkdir)
+  // and for file-vs-directory conflicts where result is APPLIED.
   string conflict_path = 3;
 }
