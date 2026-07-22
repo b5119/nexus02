@@ -11,6 +11,11 @@ use std::sync::{Mutex, OnceLock};
 
 pub use snapshot::{AppSnapshot, ConflictEntry, ConflictPolicy, ConflictSet, StateEntry};
 
+/// Per-key merge handler: receives (local, remote) byte values and returns the
+/// merged result.  Registered via [`MigrateSdk::set_merge_handler`] or the
+/// global [`register_merge_handler_internal`] function.
+pub type MergeHandler = Box<dyn Fn(Vec<u8>, Vec<u8>) -> Result<Vec<u8>, MigrateError> + Send + Sync>;
+
 // ── Error type ────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +75,7 @@ static GLOBAL: OnceLock<Mutex<GlobalState>> = OnceLock::new();
 struct GlobalState {
     app: Box<dyn MigratableApp>,
     registrations: HashMap<String, KeyRegistration>,
+    merge_handlers: HashMap<String, MergeHandler>,
     device_id: String,
     vector_clock: nexus_common::VectorClock,
     store: HashMap<String, StateEntry>,
@@ -81,6 +87,7 @@ pub fn init_global(app: Box<dyn MigratableApp>, device_id: String) -> Result<(),
     let state = GlobalState {
         app,
         registrations: HashMap::new(),
+        merge_handlers: HashMap::new(),
         device_id,
         vector_clock: nexus_common::VectorClock::new(),
         store: HashMap::new(),
@@ -108,6 +115,14 @@ pub fn register_key_internal(key: &str, registration: KeyRegistration) {
     let _ = with_global(|state| {
         state.registrations.insert(key.to_string(), registration);
         state.vector_clock.increment(&state.device_id);
+        Ok(())
+    });
+}
+
+/// Register a per-key merge handler with the global SDK.
+pub fn register_merge_handler_internal(key: &str, handler: MergeHandler) {
+    let _ = with_global(|state| {
+        state.merge_handlers.insert(key.to_string(), handler);
         Ok(())
     });
 }
@@ -162,15 +177,18 @@ pub fn import_snapshot(snapshot: AppSnapshot) -> Result<ConflictSet, MigrateErro
             let ce = &conflict_set.conflicts[i];
             if let Some(reg) = state.registrations.get(&ce.key) {
                 if reg.policy == ConflictPolicy::AppMerge {
-                    let merged = state
-                        .app
-                        .merge(&ce.key, ce.local_value.clone(), ce.remote_value.clone())
-                        .map_err(|e| {
-                            MigrateError::CallbackFailed(format!(
-                                "merge failed for '{}': {e}",
-                                ce.key
-                            ))
-                        })?;
+                    // Prefer a per-key handler if registered; fall back to trait method.
+                    let merged = if let Some(handler) = state.merge_handlers.get(&ce.key) {
+                        handler(ce.local_value.clone(), ce.remote_value.clone())
+                    } else {
+                        state.app.merge(&ce.key, ce.local_value.clone(), ce.remote_value.clone())
+                    }
+                    .map_err(|e| {
+                        MigrateError::CallbackFailed(format!(
+                            "merge failed for '{}': {e}",
+                            ce.key
+                        ))
+                    })?;
                     resolved_keys.insert(
                         ce.key.clone(),
                         StateEntry {
@@ -297,6 +315,7 @@ pub fn get_state_value(key: &str) -> Option<Vec<u8>> {
 pub struct MigrateSdk {
     app: Box<dyn MigratableApp>,
     registrations: HashMap<String, KeyRegistration>,
+    merge_handlers: HashMap<String, MergeHandler>,
     device_id: String,
     vector_clock: nexus_common::VectorClock,
 }
@@ -306,6 +325,7 @@ impl MigrateSdk {
         Self {
             app,
             registrations: HashMap::new(),
+            merge_handlers: HashMap::new(),
             device_id,
             vector_clock: nexus_common::VectorClock::new(),
         }
@@ -320,6 +340,13 @@ impl MigrateSdk {
             },
         );
         self.vector_clock.increment(&self.device_id);
+    }
+
+    /// Register a per-key merge handler. When a conflict on this key has
+    /// `ConflictPolicy::AppMerge`, the handler is invoked instead of the
+    /// trait's `merge()` method.
+    pub fn set_merge_handler(&mut self, key: String, handler: MergeHandler) {
+        self.merge_handlers.insert(key, handler);
     }
 
     pub fn export_snapshot(&mut self) -> Result<AppSnapshot, MigrateError> {
@@ -360,15 +387,18 @@ impl MigrateSdk {
             let ce = &conflict_set.conflicts[i];
             if let Some(reg) = self.registrations.get(&ce.key) {
                 if reg.policy == ConflictPolicy::AppMerge {
-                    let merged = self
-                        .app
-                        .merge(&ce.key, ce.local_value.clone(), ce.remote_value.clone())
-                        .map_err(|e| {
-                            MigrateError::CallbackFailed(format!(
-                                "merge failed for '{}': {e}",
-                                ce.key
-                            ))
-                        })?;
+                    // Prefer a per-key handler if registered; fall back to trait method.
+                    let merged = if let Some(handler) = self.merge_handlers.get(&ce.key) {
+                        handler(ce.local_value.clone(), ce.remote_value.clone())
+                    } else {
+                        self.app.merge(&ce.key, ce.local_value.clone(), ce.remote_value.clone())
+                    }
+                    .map_err(|e| {
+                        MigrateError::CallbackFailed(format!(
+                            "merge failed for '{}': {e}",
+                            ce.key
+                        ))
+                    })?;
                     resolved_keys.insert(
                         ce.key.clone(),
                         StateEntry {
@@ -648,5 +678,44 @@ mod tests {
         assert_eq!(snapshot.device_id, "global-dev");
         let conflicts = import_snapshot(snapshot).unwrap();
         assert!(conflicts.conflicts.is_empty());
+    }
+
+    #[test]
+    fn t8_per_key_merge_handler_overrides_trait() {
+        // The trait's merge picks the longer value, but the per-key handler
+        // always returns b"handler-wins" — verify the per-key handler is used.
+        let store = Arc::new(std::sync::Mutex::new(HashMap::from([(
+            "k2".into(),
+            StateEntry {
+                value: b"local-long".to_vec(),
+                conflict_policy: ConflictPolicy::AppMerge,
+                schema_version: 1,
+            },
+        )])));
+        let mut sdk = make_sdk_with(store);
+        sdk.set_merge_handler(
+            "k2".into(),
+            Box::new(|_local, _remote| Ok(b"handler-wins".to_vec())),
+        );
+        sdk.export_snapshot().unwrap();
+
+        let remote = AppSnapshot {
+            device_id: "remote".into(),
+            vector_clock: BTreeMap::from([("remote".into(), 1u64), ("test-device".into(), 1u64)]),
+            keys: HashMap::from([(
+                "k2".into(),
+                StateEntry {
+                    value: b"short".to_vec(),
+                    conflict_policy: ConflictPolicy::AppMerge,
+                    schema_version: 1,
+                },
+            )]),
+        };
+        let conflicts = sdk.import_snapshot(remote).unwrap();
+        assert!(conflicts.conflicts.is_empty());
+
+        let exported = sdk.export_snapshot().unwrap();
+        let entry = exported.keys.get("k2").unwrap();
+        assert_eq!(entry.value, b"handler-wins");
     }
 }

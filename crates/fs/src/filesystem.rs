@@ -33,8 +33,9 @@
 
 use crate::grpc_client::RemoteFs;
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
+    BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
+    INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyWrite, RenameFlags, Request, TimeOrNow, WriteFlags,
 };
 use lru::LruCache;
 use nexus_common::{ClockStore, VectorClock};
@@ -214,7 +215,7 @@ impl NexusFuse {
         let size = b.data.len() as u64;
         let now = SystemTime::now();
         Some(FileAttr {
-            ino,
+            ino: INodeNo(ino),
             size,
             blocks: size.div_ceil(512),
             atime: now,
@@ -333,7 +334,7 @@ impl NexusFuse {
         let mtime = UNIX_EPOCH + Duration::from_secs(entry.modified_unix.max(0) as u64);
 
         FileAttr {
-            ino,
+            ino: INodeNo(ino),
             size: entry.size_bytes,
             blocks: entry.size_bytes.div_ceil(512),
             atime: mtime,
@@ -353,12 +354,12 @@ impl NexusFuse {
 }
 
 impl Filesystem for NexusFuse {
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, reply: ReplyEntry) {
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEntry) {
         let parent_path = {
             let mut table = self.inodes.lock().unwrap();
-            match table.path_for_ino(parent) {
+            match table.path_for_ino(parent.0) {
                 Some(p) => p,
-                None => return reply.error(libc::ENOENT),
+                None => return reply.error(Errno::ENOENT),
             }
         };
 
@@ -374,7 +375,7 @@ impl Filesystem for NexusFuse {
         let local_ino = self.inodes.lock().unwrap().peek_ino(&child_path);
         if let Some(ino) = local_ino {
             if let Some(attr) = self.buffer_attr(ino) {
-                return reply.entry(&TTL, &attr, 0);
+                return reply.entry(&TTL, &attr, Generation(0));
             }
         }
 
@@ -391,30 +392,30 @@ impl Filesystem for NexusFuse {
                     table.ino_for_path(&child_path)
                 };
                 let attr = Self::entry_to_attr(ino, &entry);
-                reply.entry(&TTL, &attr, 0);
+                reply.entry(&TTL, &attr, Generation(0));
             }
-            Ok(None) => reply.error(libc::ENOENT),
+            Ok(None) => reply.error(Errno::ENOENT),
             Err(e) => {
                 tracing::warn!(error = %e, path = %child_path, "lookup failed");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         let path = {
             let mut table = self.inodes.lock().unwrap();
-            match table.path_for_ino(ino) {
+            match table.path_for_ino(ino.0) {
                 Some(p) => p,
-                None => return reply.error(libc::ENOENT),
+                None => return reply.error(Errno::ENOENT),
             }
         };
 
-        if ino == ROOT_INO {
+        if ino.0 == ROOT_INO {
             // Root directory attrs are synthesized rather than fetched —
             // the remote root always exists by definition once connected.
             let attr = FileAttr {
-                ino: ROOT_INO,
+                ino: INodeNo(ROOT_INO),
                 size: 0,
                 blocks: 0,
                 atime: SystemTime::now(),
@@ -435,34 +436,34 @@ impl Filesystem for NexusFuse {
 
         // An open/dirty file's authoritative size lives in its write buffer,
         // not (yet) on the host — report that.
-        if let Some(attr) = self.buffer_attr(ino) {
+        if let Some(attr) = self.buffer_attr(ino.0) {
             return reply.attr(&TTL, &attr);
         }
 
         let client = self.client.clone();
         match self.runtime.block_on(client.stat(&path)) {
-            Ok(Some(entry)) => reply.attr(&TTL, &Self::entry_to_attr(ino, &entry)),
-            Ok(None) => reply.error(libc::ENOENT),
+            Ok(Some(entry)) => reply.attr(&TTL, &Self::entry_to_attr(ino.0, &entry)),
+            Ok(None) => reply.error(Errno::ENOENT),
             Err(e) => {
                 tracing::warn!(error = %e, %path, "getattr failed");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     fn readdir(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         mut reply: ReplyDirectory,
     ) {
         let path = {
             let mut table = self.inodes.lock().unwrap();
-            match table.path_for_ino(ino) {
+            match table.path_for_ino(ino.0) {
                 Some(p) => p,
-                None => return reply.error(libc::ENOENT),
+                None => return reply.error(Errno::ENOENT),
             }
         };
 
@@ -471,15 +472,15 @@ impl Filesystem for NexusFuse {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!(error = %e, %path, "readdir failed");
-                return reply.error(libc::EIO);
+                return reply.error(Errno::EIO);
             }
         };
 
         let mut all = vec![
-            (ino, FileType::Directory, ".".to_string()),
-            (ino, FileType::Directory, "..".to_string()), // simplification: milestone 1
-                                                          // doesn't track true parent ino
-                                                          // for ".." at depth > 1 yet.
+            (ino.0, FileType::Directory, ".".to_string()),
+            (ino.0, FileType::Directory, "..".to_string()), // simplification: milestone 1
+                                                             // doesn't track true parent ino
+                                                             // for ".." at depth > 1 yet.
         ];
 
         for entry in &entries {
@@ -499,7 +500,7 @@ impl Filesystem for NexusFuse {
 
         for (i, (ino, kind, name)) in all.into_iter().enumerate().skip(offset as usize) {
             // reply.add returns true if the buffer is full — stop early if so
-            if reply.add(ino, (i + 1) as i64, kind, name) {
+            if reply.add(INodeNo(ino), (i + 1) as u64, kind, name) {
                 break;
             }
         }
@@ -507,48 +508,48 @@ impl Filesystem for NexusFuse {
     }
 
     fn read(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
         let path = {
             let mut table = self.inodes.lock().unwrap();
-            match table.path_for_ino(ino) {
+            match table.path_for_ino(ino.0) {
                 Some(p) => p,
-                None => return reply.error(libc::ENOENT),
+                None => return reply.error(Errno::ENOENT),
             }
         };
 
         let client = self.client.clone();
         let result = self
             .runtime
-            .block_on(client.read_range(&path, offset as u64, size as u64));
+            .block_on(client.read_range(&path, offset, size as u64));
 
         match result {
             Ok(data) => reply.data(&data),
             Err(e) => {
                 tracing::warn!(error = %e, %path, "read failed");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
-    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         // On a read-intent open, sync this client's clock for the file from the
         // host, so a later edit builds on the version we actually read instead
         // of being flagged a spurious conflict (ADR 0007). A write-only open
         // (e.g. the truncating `>`) is deliberately NOT synced: blindly
         // overwriting a file that changed underneath us is a real conflict we
         // still want to catch.
-        let access = flags & libc::O_ACCMODE;
+        let access = flags.0 & libc::O_ACCMODE;
         if access == libc::O_RDONLY || access == libc::O_RDWR {
-            let path = self.inodes.lock().unwrap().path_for_ino(ino);
+            let path = self.inodes.lock().unwrap().path_for_ino(ino.0);
             if let Some(path) = path {
                 if let Ok(Some((_entry, host_clock))) =
                     self.runtime.block_on(self.client.stat_full(&path))
@@ -558,13 +559,13 @@ impl Filesystem for NexusFuse {
                 }
             }
         }
-        reply.opened(0, 0);
+        reply.opened(FileHandle(0), FopenFlags::empty());
     }
 
     fn create(
-        &mut self,
+        &self,
         _req: &Request,
-        parent: u64,
+        parent: INodeNo,
         name: &std::ffi::OsStr,
         _mode: u32,
         _umask: u32,
@@ -573,9 +574,9 @@ impl Filesystem for NexusFuse {
     ) {
         let parent_path = {
             let mut table = self.inodes.lock().unwrap();
-            match table.path_for_ino(parent) {
+            match table.path_for_ino(parent.0) {
                 Some(p) => p,
-                None => return reply.error(libc::ENOENT),
+                None => return reply.error(Errno::ENOENT),
             }
         };
         let name_str = name.to_string_lossy().to_string();
@@ -597,35 +598,35 @@ impl Filesystem for NexusFuse {
             },
         );
         let attr = self.buffer_attr(ino).expect("buffer just inserted");
-        reply.created(&TTL, &attr, 0, 0, 0);
+        reply.created(&TTL, &attr, Generation(0), FileHandle(0), FopenFlags::empty());
     }
 
     fn write(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _write_flags: WriteFlags,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
         let path = {
             let mut table = self.inodes.lock().unwrap();
-            match table.path_for_ino(ino) {
+            match table.path_for_ino(ino.0) {
                 Some(p) => p,
-                None => return reply.error(libc::ENOENT),
+                None => return reply.error(Errno::ENOENT),
             }
         };
 
-        if self.ensure_loaded(ino, &path).is_err() {
-            return reply.error(libc::EIO);
+        if self.ensure_loaded(ino.0, &path).is_err() {
+            return reply.error(Errno::EIO);
         }
 
         let mut bufs = self.write_buffers.lock().unwrap();
-        let b = bufs.entry(ino).or_insert(FileBuf {
+        let b = bufs.entry(ino.0).or_insert(FileBuf {
             data: Vec::new(),
             dirty: false,
             loaded: true,
@@ -642,9 +643,9 @@ impl Filesystem for NexusFuse {
 
     #[allow(clippy::too_many_arguments)]
     fn setattr(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
+        ino: INodeNo,
         _mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
@@ -652,18 +653,18 @@ impl Filesystem for NexusFuse {
         _atime: Option<TimeOrNow>,
         _mtime: Option<TimeOrNow>,
         _ctime: Option<SystemTime>,
-        _fh: Option<u64>,
+        _fh: Option<FileHandle>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
+        _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
         let path = {
             let mut table = self.inodes.lock().unwrap();
-            match table.path_for_ino(ino) {
+            match table.path_for_ino(ino.0) {
                 Some(p) => p,
-                None => return reply.error(libc::ENOENT),
+                None => return reply.error(Errno::ENOENT),
             }
         };
 
@@ -672,7 +673,7 @@ impl Filesystem for NexusFuse {
             if new_size == 0 {
                 // Truncating to empty — no need to read existing content.
                 self.write_buffers.lock().unwrap().insert(
-                    ino,
+                    ino.0,
                     FileBuf {
                         data: Vec::new(),
                         dirty: true,
@@ -680,11 +681,11 @@ impl Filesystem for NexusFuse {
                     },
                 );
             } else {
-                if self.ensure_loaded(ino, &path).is_err() {
-                    return reply.error(libc::EIO);
+                if self.ensure_loaded(ino.0, &path).is_err() {
+                    return reply.error(Errno::EIO);
                 }
                 let mut bufs = self.write_buffers.lock().unwrap();
-                if let Some(b) = bufs.get_mut(&ino) {
+                if let Some(b) = bufs.get_mut(&ino.0) {
                     b.data.resize(new_size as usize, 0);
                     b.dirty = true;
                 }
@@ -692,17 +693,17 @@ impl Filesystem for NexusFuse {
         }
 
         // Reply with current attrs: buffer if open, else host, else ENOENT.
-        if let Some(attr) = self.buffer_attr(ino) {
+        if let Some(attr) = self.buffer_attr(ino.0) {
             return reply.attr(&TTL, &attr);
         }
         let client = self.client.clone();
         match self.runtime.block_on(client.stat(&path)) {
-            Ok(Some(entry)) => reply.attr(&TTL, &Self::entry_to_attr(ino, &entry)),
-            _ => reply.error(libc::ENOENT),
+            Ok(Some(entry)) => reply.attr(&TTL, &Self::entry_to_attr(ino.0, &entry)),
+            _ => reply.error(Errno::ENOENT),
         }
     }
 
-    fn flush(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+    fn flush(&self, _req: &Request, _ino: INodeNo, _fh: FileHandle, _lock_owner: LockOwner, reply: ReplyEmpty) {
         // `flush` can fire multiple times per open (e.g. on each close() of a
         // dup'd fd). We do the actual write-back once, on `release` (and on
         // `fsync`), so the clock is incremented exactly once per write session.
@@ -710,40 +711,40 @@ impl Filesystem for NexusFuse {
     }
 
     fn release(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        ino: INodeNo,
+        _fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        if let Some(p) = self.inodes.lock().unwrap().path_for_ino(ino) {
-            let _ = self.flush_buffer(ino, &p);
+        if let Some(p) = self.inodes.lock().unwrap().path_for_ino(ino.0) {
+            let _ = self.flush_buffer(ino.0, &p);
         }
         // Drop the buffer now that the file is fully closed.
-        self.write_buffers.lock().unwrap().remove(&ino);
+        self.write_buffers.lock().unwrap().remove(&ino.0);
         reply.ok();
     }
 
-    fn fsync(&mut self, _req: &Request, ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
-        let path = self.inodes.lock().unwrap().path_for_ino(ino);
+    fn fsync(&self, _req: &Request, ino: INodeNo, _fh: FileHandle, _datasync: bool, reply: ReplyEmpty) {
+        let path = self.inodes.lock().unwrap().path_for_ino(ino.0);
         match path {
-            Some(p) => match self.flush_buffer(ino, &p) {
+            Some(p) => match self.flush_buffer(ino.0, &p) {
                 Ok(_) => reply.ok(),
-                Err(_) => reply.error(libc::EIO),
+                Err(_) => reply.error(Errno::EIO),
             },
             None => reply.ok(),
         }
     }
 
-    fn unlink(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, reply: ReplyEmpty) {
+    fn unlink(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
         let parent_path = {
             let mut table = self.inodes.lock().unwrap();
-            match table.path_for_ino(parent) {
+            match table.path_for_ino(parent.0) {
                 Some(p) => p,
-                None => return reply.error(libc::ENOENT),
+                None => return reply.error(Errno::ENOENT),
             }
         };
         let name_str = name.to_string_lossy().to_string();
@@ -790,37 +791,37 @@ impl Filesystem for NexusFuse {
             }
             Err(e) => {
                 tracing::warn!(error = %e, %path, "delete failed");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     fn rename(
-        &mut self,
+        &self,
         _req: &Request,
-        parent: u64,
+        parent: INodeNo,
         name: &std::ffi::OsStr,
-        newparent: u64,
+        newparent: INodeNo,
         newname: &std::ffi::OsStr,
-        flags: u32,
+        flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        // We only support plain rename (flags == 0). RENAME_NOREPLACE,
+        // We only support plain rename (flags empty). RENAME_NOREPLACE,
         // RENAME_EXCHANGE, and other non-zero flags are rejected until
         // we propagate them through the gRPC layer (ADR 0009).
-        if flags != 0 {
-            return reply.error(libc::EINVAL);
+        if !flags.is_empty() {
+            return reply.error(Errno::EINVAL);
         }
 
         let (old_path, new_path) = {
             let mut table = self.inodes.lock().unwrap();
-            let parent_path = match table.path_for_ino(parent) {
+            let parent_path = match table.path_for_ino(parent.0) {
                 Some(p) => p,
-                None => return reply.error(libc::ENOENT),
+                None => return reply.error(Errno::ENOENT),
             };
-            let newparent_path = match table.path_for_ino(newparent) {
+            let newparent_path = match table.path_for_ino(newparent.0) {
                 Some(p) => p,
-                None => return reply.error(libc::ENOENT),
+                None => return reply.error(Errno::ENOENT),
             };
             let name_str = name.to_string_lossy().to_string();
             let newname_str = newname.to_string_lossy().to_string();
@@ -837,7 +838,7 @@ impl Filesystem for NexusFuse {
             // Reject directory renames — we don't remap subtree entries
             // in the inode table yet (ADR 0009).
             if table.is_dir(&old) {
-                return reply.error(libc::EISDIR);
+                return reply.error(Errno::EISDIR);
             }
             (old, new)
         };
@@ -883,17 +884,17 @@ impl Filesystem for NexusFuse {
                     tracing::warn!(%old_path, "rename stale (host has a newer version)");
                     // Adopt the host clock so the next attempt builds on it.
                     let _ = self.client_clocks.put(&old_path, merged);
-                    reply.error(libc::EAGAIN);
+                    reply.error(Errno::EAGAIN);
                 } else if result_code == rename_file_response::Result::NotFound as i32 {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                 } else {
                     tracing::warn!(result = %result_code, "unknown rename result");
-                    reply.error(libc::EIO);
+                    reply.error(Errno::EIO);
                 }
             }
             Err(e) => {
                 tracing::warn!(error = %e, %old_path, "rename failed");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }

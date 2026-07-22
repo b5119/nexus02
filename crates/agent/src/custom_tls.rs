@@ -1,5 +1,10 @@
-// Ready to wire into tonic once tonic::transport::Error
-// becomes pub. See issue #41 and #15 (tonic upgrade).
+// Blocked: tonic 0.14.6 does not expose a public API to inject a custom
+// rustls::ServerConfig into ServerTlsConfig. The internal `tls_acceptor()`
+// method is pub(crate). See issue #41 and #15 (tonic upgrade).
+//
+// The current approach in host.rs uses `client_ca_root()` which builds a
+// WebPkiClientVerifier internally. This is stricter (rejects non-paired
+// certs at the TLS layer) and sufficient for our mTLS + interceptor model.
 
 use std::sync::Arc;
 

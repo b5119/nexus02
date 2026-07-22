@@ -189,8 +189,9 @@ async fn main() -> Result<()> {
 
             let mountpoint_clone = mountpoint.clone();
             tokio::task::spawn_blocking(move || {
-                let options = vec![fuser::MountOption::FSName("nexus".into())];
-                fuser::mount2(fs, &mountpoint_clone, &options)
+                let mut config = fuser::Config::default();
+                config.mount_options = vec![fuser::MountOption::FSName("nexus".into())];
+                fuser::mount2(fs, &mountpoint_clone, &config)
             })
             .await??;
 
