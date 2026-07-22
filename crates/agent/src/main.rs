@@ -79,8 +79,7 @@ enum Command {
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| {
-            std::fs::read_to_string("/proc/sys/kernel/hostname")
-                .map(|s| s.trim().to_string())
+            std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string())
         })
         .unwrap_or_else(|_| "nexus-device".to_string())
 }

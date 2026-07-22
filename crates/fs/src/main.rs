@@ -159,8 +159,8 @@ async fn main() -> Result<()> {
                     )
                 } else {
                     let remote_addr = remote.clone().unwrap();
-                    let token_val =
-                        token.context("--token is required (or use --trusted for a paired device)")?;
+                    let token_val = token
+                        .context("--token is required (or use --trusted for a paired device)")?;
                     let ca_path = ca_cert
                         .context("--ca-cert is required (or use --trusted for a paired device)")?;
                     let ca_pem = std::fs::read_to_string(&ca_path)
@@ -175,13 +175,8 @@ async fn main() -> Result<()> {
 
             let client = match maybe_client_identity {
                 Some((cert_pem, key_pem)) => {
-                    grpc_client::RemoteFs::connect_trusted(
-                        remote_addr,
-                        ca_pem,
-                        cert_pem,
-                        key_pem,
-                    )
-                    .await?
+                    grpc_client::RemoteFs::connect_trusted(remote_addr, ca_pem, cert_pem, key_pem)
+                        .await?
                 }
                 None => grpc_client::RemoteFs::connect(remote_addr, ca_pem, token_val).await?,
             };
@@ -189,8 +184,9 @@ async fn main() -> Result<()> {
 
             let mountpoint_clone = mountpoint.clone();
             tokio::task::spawn_blocking(move || {
-                let options = vec![fuser::MountOption::FSName("nexus".into())];
-                fuser::mount2(fs, &mountpoint_clone, &options)
+                let mut config = fuser::Config::default();
+                config.mount_options = vec![fuser::MountOption::FSName("nexus".into())];
+                fuser::mount2(fs, &mountpoint_clone, &config)
             })
             .await??;
 
@@ -280,7 +276,13 @@ async fn main() -> Result<()> {
 async fn resolve_via_mdns(
     host_id: Option<&str>,
     timeout_secs: u64,
-) -> Result<(String, String, String, Option<(String, String)>, nexus_common::DeviceId)> {
+) -> Result<(
+    String,
+    String,
+    String,
+    Option<(String, String)>,
+    nexus_common::DeviceId,
+)> {
     let daemon = mdns_sd::ServiceDaemon::new()?;
     let receiver = daemon
         .browse("_nexus._tcp.local.")
@@ -341,9 +343,7 @@ async fn resolve_via_mdns(
             .into_iter()
             .find(|(id, _, _)| id == hid)
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Host ID {hid} not found among discovered paired devices"
-                )
+                anyhow::anyhow!("Host ID {hid} not found among discovered paired devices")
             })?,
         None if paired.len() == 1 => paired.into_iter().next().unwrap(),
         _ => {
@@ -360,14 +360,24 @@ async fn resolve_via_mdns(
     };
 
     let entry = store
-        .get(&nexus_common::DeviceId(uuid::Uuid::parse_str(&chosen_id).unwrap()))
+        .get(&nexus_common::DeviceId(
+            uuid::Uuid::parse_str(&chosen_id).unwrap(),
+        ))
         .context("paired host entry not found")?;
 
     let cfg_dir = config::config_dir()?;
-    let cert_pem = std::fs::read_to_string(cfg_dir.join("cert.pem"))
-        .with_context(|| format!("reading client cert from {}", cfg_dir.join("cert.pem").display()))?;
-    let key_pem = std::fs::read_to_string(cfg_dir.join("key.pem"))
-        .with_context(|| format!("reading client key from {}", cfg_dir.join("key.pem").display()))?;
+    let cert_pem = std::fs::read_to_string(cfg_dir.join("cert.pem")).with_context(|| {
+        format!(
+            "reading client cert from {}",
+            cfg_dir.join("cert.pem").display()
+        )
+    })?;
+    let key_pem = std::fs::read_to_string(cfg_dir.join("key.pem")).with_context(|| {
+        format!(
+            "reading client key from {}",
+            cfg_dir.join("key.pem").display()
+        )
+    })?;
     let cert_device_id = pairing::extract_device_id_from_cert_pem(&cert_pem)
         .context("extracting device ID from client cert")?;
 

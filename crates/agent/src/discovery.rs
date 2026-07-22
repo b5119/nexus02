@@ -31,11 +31,7 @@ impl DiscoveryService {
         let hostname = format!("{}.local.", device_id);
         let device_id_str = device_id.to_string();
 
-        let paired_list: Vec<String> = peers
-            .list()
-            .iter()
-            .map(|(id, _entry)| id.clone())
-            .collect();
+        let paired_list: Vec<String> = peers.list().iter().map(|(id, _entry)| id.clone()).collect();
         let paired_str = paired_list.join(",");
 
         let properties: &[(&str, &str)] = &[
@@ -45,21 +41,12 @@ impl DiscoveryService {
             ("display_name", display_name),
         ];
 
-        let info = ServiceInfo::new(
-            "_nexus._tcp.local.",
-            &name,
-            &hostname,
-            "",
-            port,
-            properties,
-        )
-        .context("creating mDNS service info")?;
+        let info = ServiceInfo::new("_nexus._tcp.local.", &name, &hostname, "", port, properties)
+            .context("creating mDNS service info")?;
 
         // Fullname for deregistration: <instance>._nexus._tcp.local.
         let fullname = format!("{name}._nexus._tcp.local.");
-        daemon
-            .register(info)
-            .context("registering mDNS service")?;
+        daemon.register(info).context("registering mDNS service")?;
 
         tracing::info!(%fullname, %port, "mDNS service registered");
 

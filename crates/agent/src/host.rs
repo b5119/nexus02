@@ -16,12 +16,12 @@
 use anyhow::Result;
 use nexus_common::{ClockOrder, ClockStore, TombstoneStore, VectorClock};
 use nexus_proto::fs::v1::{
-    delete_file_response, mkdir_file_response,
+    delete_file_response,
     file_service_server::{FileService, FileServiceServer},
-    rename_file_response, write_file_response, DeleteFileRequest, DeleteFileResponse, FileEntry,
-    ListDirRequest, ListDirResponse, MkdirFileRequest, MkdirFileResponse, ReadFileChunk,
-    ReadFileRequest, RenameFileRequest, RenameFileResponse, StatRequest, StatResponse,
-    WriteFileChunk, WriteFileRequest, WriteFileResponse,
+    mkdir_file_response, rename_file_response, write_file_response, DeleteFileRequest,
+    DeleteFileResponse, FileEntry, ListDirRequest, ListDirResponse, MkdirFileRequest,
+    MkdirFileResponse, ReadFileChunk, ReadFileRequest, RenameFileRequest, RenameFileResponse,
+    StatRequest, StatResponse, WriteFileChunk, WriteFileRequest, WriteFileResponse,
 };
 use nexus_proto::stream::v1::stream_service_server::StreamServiceServer;
 use rustls_pki_types::CertificateDer;
@@ -192,7 +192,9 @@ impl FileServiceImpl {
     /// Called before resolve_for_write to prevent "parent directory not found" errors
     /// when writing into a previously-deleted directory (ADR 0016).
     fn ensure_parent_not_tombstoned(&self, path: &str) -> Result<(), Status> {
-        let parent = Path::new(path).parent().map(|p| p.to_string_lossy().into_owned());
+        let parent = Path::new(path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned());
         if let Some(parent) = parent {
             let parent_key = Self::clock_key(&parent);
             if !self.tombstones.get(&parent_key).0.is_empty() {
@@ -847,9 +849,7 @@ impl FileService for FileServiceImpl {
         // If the path already exists as a file, check clock then rename it out of the way.
         if dest.exists() && dest.is_file() {
             let stored = self.clocks.get(&key);
-            if !stored.0.is_empty()
-                && incoming.compare(&stored) == ClockOrder::DominatedBy
-            {
+            if !stored.0.is_empty() && incoming.compare(&stored) == ClockOrder::DominatedBy {
                 tracing::warn!(path = %req.path, "ignoring stale mkdir (file-in-the-way)");
                 return Ok(Response::new(MkdirFileResponse {
                     result: mkdir_file_response::Result::Stale as i32,
@@ -947,12 +947,18 @@ impl FileService for FileServiceImpl {
                         }
                     }
                     // Move the directory's own clock entry.
-                    if let Some(entry) = self.clocks.entries().into_iter().find(|(k, _)| k == &key) {
+                    if let Some(entry) = self.clocks.entries().into_iter().find(|(k, _)| k == &key)
+                    {
                         self.clocks.remove(&key).ok();
                         self.clocks.put(&conflict_rel, entry.1.clock).ok();
                     }
                     // Move the directory's own tombstone entry.
-                    if let Some(entry) = self.tombstones.entries().into_iter().find(|(k, _)| k == &key) {
+                    if let Some(entry) = self
+                        .tombstones
+                        .entries()
+                        .into_iter()
+                        .find(|(k, _)| k == &key)
+                    {
                         self.tombstones.remove(&key).ok();
                         self.tombstones.put(&conflict_rel, entry.1.clock).ok();
                     }
@@ -978,9 +984,7 @@ impl FileService for FileServiceImpl {
         } else {
             // Path does not exist — check tombstone before fresh mkdir.
             let tombstone = self.tombstones.get(&key);
-            if !tombstone.0.is_empty()
-                && incoming.compare(&tombstone) == ClockOrder::DominatedBy
-            {
+            if !tombstone.0.is_empty() && incoming.compare(&tombstone) == ClockOrder::DominatedBy {
                 tracing::warn!(path = %req.path, "ignoring stale mkdir (parent tombstoned)");
                 return Ok(Response::new(MkdirFileResponse {
                     result: mkdir_file_response::Result::Stale as i32,
@@ -1422,11 +1426,7 @@ mod tests {
         })
     }
 
-    fn mkdir_req(
-        path: &str,
-        clock: &[(&str, u64)],
-        writer: &str,
-    ) -> Request<MkdirFileRequest> {
+    fn mkdir_req(path: &str, clock: &[(&str, u64)], writer: &str) -> Request<MkdirFileRequest> {
         Request::new(MkdirFileRequest {
             path: path.to_string(),
             clock: pclock(clock),
@@ -2406,9 +2406,14 @@ mod tests {
 
         // Create a file inside a subdirectory.
         std::fs::create_dir_all(dir.path().join("work")).unwrap();
-        s.write_file(write_req("work/report.txt", b"report", &[("dev-a", 1)], "dev-a"))
-            .await
-            .unwrap();
+        s.write_file(write_req(
+            "work/report.txt",
+            b"report",
+            &[("dev-a", 1)],
+            "dev-a",
+        ))
+        .await
+        .unwrap();
 
         // Tombstone the parent directory and remove it from disk (simulates
         // a remote delete that created a tombstone for "work").
@@ -2418,7 +2423,12 @@ mod tests {
         // Write a new file under the tombstoned parent — should recreate
         // the directory transparently (write wins, ADR 0016).
         let resp = s
-            .write_file(write_req("work/new.txt", b"new data", &[("dev-a", 3)], "dev-a"))
+            .write_file(write_req(
+                "work/new.txt",
+                b"new data",
+                &[("dev-a", 3)],
+                "dev-a",
+            ))
             .await
             .unwrap()
             .into_inner();
@@ -2587,11 +2597,7 @@ mod tests {
         while let Some(chunk) = read_stream.message().await.unwrap() {
             read_back.extend_from_slice(&chunk.data);
         }
-        assert_eq!(
-            read_back.len(),
-            data.len(),
-            "round-trip length mismatch"
-        );
+        assert_eq!(read_back.len(), data.len(), "round-trip length mismatch");
         assert_eq!(read_back, data, "round-trip content mismatch");
 
         // Clean shutdown.
