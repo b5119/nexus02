@@ -4,7 +4,7 @@ use std::collections::HashMap;
 /// Backward-compatible serde module for `Vec<u8>`: serializes as base64,
 /// deserializes both base64 (new) and JSON array-of-numbers (legacy).
 mod base64_bytes {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use serde::{Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
@@ -91,7 +91,10 @@ mod tests {
         };
         let json = serde_json::to_string(&entry).unwrap();
         // Should be base64-encoded, not a JSON array of numbers.
-        assert!(json.contains("aGVsbG8gd29ybGQ="), "expected base64 in {json}");
+        assert!(
+            json.contains("aGVsbG8gd29ybGQ="),
+            "expected base64 in {json}"
+        );
         let decoded: StateEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.value, b"hello world");
     }
@@ -132,7 +135,10 @@ mod tests {
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         // Non-UTF8 bytes should be base64, not an array.
-        assert!(json.contains("//4="), "expected base64 for binary data in {json}");
+        assert!(
+            json.contains("//4="),
+            "expected base64 for binary data in {json}"
+        );
         let decoded: AppSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.keys.get("k").unwrap().value, b"\xff\xfe");
     }

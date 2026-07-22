@@ -57,11 +57,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let (host_str, host_device_id, ca_pem, client_cert_pem, client_key_pem) = if args.discover {
-        let (host, device_id, ca, cert, key) = resolve_via_mdns_viewer(
-            args.host_id.as_deref(),
-            args.discover_timeout,
-        )
-        .await?;
+        let (host, device_id, ca, cert, key) =
+            resolve_via_mdns_viewer(args.host_id.as_deref(), args.discover_timeout).await?;
         (host, device_id, ca, cert, key)
     } else if args.trusted {
         let store_path = config_dir()?.join("trusted-certs.json");
@@ -149,7 +146,13 @@ async fn main() -> Result<()> {
 async fn resolve_via_mdns_viewer(
     host_id: Option<&str>,
     timeout_secs: u64,
-) -> Result<(String, String, Option<String>, Option<String>, Option<String>)> {
+) -> Result<(
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+)> {
     let daemon = mdns_sd::ServiceDaemon::new()?;
     let receiver = daemon
         .browse("_nexus._tcp.local.")
@@ -193,8 +196,8 @@ async fn resolve_via_mdns_viewer(
     let store_path = config_dir()?.join("trusted-certs.json");
     let raw = std::fs::read_to_string(&store_path)
         .with_context(|| format!("reading {}", store_path.display()))?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {}", store_path.display()))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", store_path.display()))?;
     let hosts = parsed
         .get("hosts")
         .and_then(|v| v.as_object())
@@ -206,14 +209,18 @@ async fn resolve_via_mdns_viewer(
         .collect();
 
     if paired.is_empty() {
-        anyhow::bail!("No paired nexus devices found on the LAN. Pair first with `nexus-mount pair`.");
+        anyhow::bail!(
+            "No paired nexus devices found on the LAN. Pair first with `nexus-mount pair`."
+        );
     }
 
     let (chosen_id, addr, port) = match args.host_id.as_deref() {
         Some(hid) => paired
             .into_iter()
             .find(|(id, _, _)| id == hid)
-            .ok_or_else(|| anyhow::anyhow!("Host ID {hid} not found among discovered paired devices"))?,
+            .ok_or_else(|| {
+                anyhow::anyhow!("Host ID {hid} not found among discovered paired devices")
+            })?,
         None if paired.len() == 1 => paired.into_iter().next().unwrap(),
         _ => {
             let list: String = paired
@@ -244,6 +251,11 @@ async fn resolve_via_mdns_viewer(
     let host_str = format!("https://{sa}");
     tracing::info!(%host_str, chosen_id = %chosen_id, "resolved host via mDNS for viewer");
 
-    Ok((host_str, chosen_id, cert, Some(client_cert), Some(client_key)))
+    Ok((
+        host_str,
+        chosen_id,
+        cert,
+        Some(client_cert),
+        Some(client_key),
+    ))
 }
-

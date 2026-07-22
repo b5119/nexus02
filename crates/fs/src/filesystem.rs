@@ -34,8 +34,8 @@
 use crate::grpc_client::RemoteFs;
 use fuser::{
     BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyWrite, RenameFlags, Request, TimeOrNow, WriteFlags,
+    INodeNo, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
 use lru::LruCache;
 use nexus_common::{ClockStore, VectorClock};
@@ -479,8 +479,8 @@ impl Filesystem for NexusFuse {
         let mut all = vec![
             (ino.0, FileType::Directory, ".".to_string()),
             (ino.0, FileType::Directory, "..".to_string()), // simplification: milestone 1
-                                                             // doesn't track true parent ino
-                                                             // for ".." at depth > 1 yet.
+                                                            // doesn't track true parent ino
+                                                            // for ".." at depth > 1 yet.
         ];
 
         for entry in &entries {
@@ -598,7 +598,13 @@ impl Filesystem for NexusFuse {
             },
         );
         let attr = self.buffer_attr(ino).expect("buffer just inserted");
-        reply.created(&TTL, &attr, Generation(0), FileHandle(0), FopenFlags::empty());
+        reply.created(
+            &TTL,
+            &attr,
+            Generation(0),
+            FileHandle(0),
+            FopenFlags::empty(),
+        );
     }
 
     fn write(
@@ -703,7 +709,14 @@ impl Filesystem for NexusFuse {
         }
     }
 
-    fn flush(&self, _req: &Request, _ino: INodeNo, _fh: FileHandle, _lock_owner: LockOwner, reply: ReplyEmpty) {
+    fn flush(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _lock_owner: LockOwner,
+        reply: ReplyEmpty,
+    ) {
         // `flush` can fire multiple times per open (e.g. on each close() of a
         // dup'd fd). We do the actual write-back once, on `release` (and on
         // `fsync`), so the clock is incremented exactly once per write session.
@@ -728,7 +741,14 @@ impl Filesystem for NexusFuse {
         reply.ok();
     }
 
-    fn fsync(&self, _req: &Request, ino: INodeNo, _fh: FileHandle, _datasync: bool, reply: ReplyEmpty) {
+    fn fsync(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
         let path = self.inodes.lock().unwrap().path_for_ino(ino.0);
         match path {
             Some(p) => match self.flush_buffer(ino.0, &p) {

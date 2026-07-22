@@ -14,7 +14,8 @@ pub use snapshot::{AppSnapshot, ConflictEntry, ConflictPolicy, ConflictSet, Stat
 /// Per-key merge handler: receives (local, remote) byte values and returns the
 /// merged result.  Registered via [`MigrateSdk::set_merge_handler`] or the
 /// global [`register_merge_handler_internal`] function.
-pub type MergeHandler = Box<dyn Fn(Vec<u8>, Vec<u8>) -> Result<Vec<u8>, MigrateError> + Send + Sync>;
+pub type MergeHandler =
+    Box<dyn Fn(Vec<u8>, Vec<u8>) -> Result<Vec<u8>, MigrateError> + Send + Sync>;
 
 // ── Error type ────────────────────────────────────────────────────────────
 
@@ -181,13 +182,12 @@ pub fn import_snapshot(snapshot: AppSnapshot) -> Result<ConflictSet, MigrateErro
                     let merged = if let Some(handler) = state.merge_handlers.get(&ce.key) {
                         handler(ce.local_value.clone(), ce.remote_value.clone())
                     } else {
-                        state.app.merge(&ce.key, ce.local_value.clone(), ce.remote_value.clone())
+                        state
+                            .app
+                            .merge(&ce.key, ce.local_value.clone(), ce.remote_value.clone())
                     }
                     .map_err(|e| {
-                        MigrateError::CallbackFailed(format!(
-                            "merge failed for '{}': {e}",
-                            ce.key
-                        ))
+                        MigrateError::CallbackFailed(format!("merge failed for '{}': {e}", ce.key))
                     })?;
                     resolved_keys.insert(
                         ce.key.clone(),
@@ -391,13 +391,11 @@ impl MigrateSdk {
                     let merged = if let Some(handler) = self.merge_handlers.get(&ce.key) {
                         handler(ce.local_value.clone(), ce.remote_value.clone())
                     } else {
-                        self.app.merge(&ce.key, ce.local_value.clone(), ce.remote_value.clone())
+                        self.app
+                            .merge(&ce.key, ce.local_value.clone(), ce.remote_value.clone())
                     }
                     .map_err(|e| {
-                        MigrateError::CallbackFailed(format!(
-                            "merge failed for '{}': {e}",
-                            ce.key
-                        ))
+                        MigrateError::CallbackFailed(format!("merge failed for '{}': {e}", ce.key))
                     })?;
                     resolved_keys.insert(
                         ce.key.clone(),
