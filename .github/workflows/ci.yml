@@ -57,6 +57,41 @@ jobs:
       - name: Test
         run: cargo test --workspace --verbose
 
+  build-and-test-ffmpeg:
+    name: build & test (ffmpeg feature)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 1
+      RUSTFLAGS: "-C codegen-units=1"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # libavcodec-dev, libavformat-dev etc for ffmpeg-next;
+      # libpipewire-0.3-dev for PipeWire/Wayland capture.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
+            libpostproc-dev libswresample-dev libswscale-dev libx264-dev \
+            libpipewire-0.3-dev \
+            pkg-config protobuf-compiler
+
+      - name: Free disk space before ffmpeg build
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          df -h
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
       - name: Build (ffmpeg feature)
         run: cargo build --features nexus-stream/ffmpeg --workspace --all-targets --verbose
 

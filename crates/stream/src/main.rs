@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
 
         let device_id = match args.host_id.as_deref() {
             Some(hid) => {
-                if !hosts.contains_key(*hid) {
+                if !hosts.contains_key(hid) {
                     anyhow::bail!("Host ID {hid} not found among paired devices");
                 }
                 hid.to_string()
@@ -214,7 +214,7 @@ async fn resolve_via_mdns_viewer(
         );
     }
 
-    let (chosen_id, addr, port) = match args.host_id.as_deref() {
+    let (chosen_id, addr, port) = match host_id {
         Some(hid) => paired
             .into_iter()
             .find(|(id, _, _)| id == hid)
