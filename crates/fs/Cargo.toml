@@ -32,5 +32,5 @@ mdns-sd.workspace = true
 # `agent` crate only, never `fs`. This cfg is a safety net in case
 # someone tries anyway.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-fuser = "0.15"
+fuser = "0.17"
 libc = "0.2"

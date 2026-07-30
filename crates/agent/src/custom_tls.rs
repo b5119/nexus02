@@ -1,14 +1,17 @@
-// Ready to wire into tonic once tonic::transport::Error
-// becomes pub. See issue #41 and #15 (tonic upgrade).
+// Blocked: tonic 0.14.6 does not expose a public API to inject a custom
+// rustls::ServerConfig into ServerTlsConfig. The internal `tls_acceptor()`
+// method is pub(crate). See issue #41 and #15 (tonic upgrade).
+//
+// The current approach in host.rs uses `client_ca_root()` which builds a
+// WebPkiClientVerifier internally. This is stricter (rejects non-paired
+// certs at the TLS layer) and sufficient for our mTLS + interceptor model.
 
 use std::sync::Arc;
 
 use rustls::client::danger::HandshakeSignatureValid;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::WebPkiClientVerifier;
-use rustls::{
-    DistinguishedName, Error, RootCertStore, ServerConfig, SignatureScheme,
-};
+use rustls::{DistinguishedName, Error, RootCertStore, ServerConfig, SignatureScheme};
 use rustls_pki_types::{CertificateDer, UnixTime};
 use x509_cert::der::Decode;
 
@@ -55,7 +58,9 @@ impl ClientCertVerifier for AcceptAllClientCertVerifier {
         let not_after = validity.not_after.to_unix_duration().as_secs();
         let now_secs = now.as_secs();
         if now_secs < not_before {
-            return Err(Error::General("client certificate not yet valid".to_string()));
+            return Err(Error::General(
+                "client certificate not yet valid".to_string(),
+            ));
         }
         if now_secs > not_after {
             return Err(Error::General("client certificate has expired".to_string()));
@@ -88,10 +93,7 @@ impl ClientCertVerifier for AcceptAllClientCertVerifier {
 
 /// Build a `rustls::ServerConfig` that accepts all client certs at the TLS
 /// layer and defers verification to the application-layer interceptor.
-pub fn build_server_config(
-    cert_pem: &str,
-    key_pem: &str,
-) -> Result<ServerConfig, anyhow::Error> {
+pub fn build_server_config(cert_pem: &str, key_pem: &str) -> Result<ServerConfig, anyhow::Error> {
     let provider = rustls::crypto::ring::default_provider();
 
     // Build an inner WebPkiClientVerifier for TLS signature verification.
@@ -108,8 +110,7 @@ pub fn build_server_config(
     let mut config = ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(
-            rustls_pemfile::certs(&mut cert_pem.as_bytes())
-                .collect::<Result<Vec<_>, _>>()?,
+            rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?,
             rustls_pemfile::private_key(&mut key_pem.as_bytes())
                 .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?
                 .ok_or_else(|| anyhow::anyhow!("no private key found in PEM"))?,

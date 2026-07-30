@@ -6,11 +6,12 @@ edition = "2021"
 [[bin]]
 name = "nexus-viewer"
 path = "src/main.rs"
-required-features = ["ffmpeg"]
+required-features = ["ffmpeg", "display"]
 
 [features]
 default = []
 ffmpeg = ["ffmpeg-next", "ashpd", "pipewire"]
+display = ["dep:pixels", "dep:winit"]
 
 [dependencies]
 nexus-common = { path = "../common" }
@@ -27,8 +28,8 @@ uuid.workspace = true
 ffmpeg-next = { workspace = true, optional = true }
 ashpd = { workspace = true, features = ["screencast"], optional = true }
 pipewire = { workspace = true, features = ["v1_0_0"], optional = true }
-winit = { workspace = true, features = ["x11", "rwh_05"] }
-pixels.workspace = true
+winit = { workspace = true, features = ["x11", "rwh_05"], optional = true }
+pixels = { workspace = true, optional = true }
 tokio-stream.workspace = true
 futures-util.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
