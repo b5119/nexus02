@@ -121,11 +121,11 @@ pub fn register_key_internal(key: &str, registration: KeyRegistration) {
 }
 
 /// Register a per-key merge handler with the global SDK.
-pub fn register_merge_handler_internal(key: &str, handler: MergeHandler) {
-    let _ = with_global(|state| {
+pub fn register_merge_handler_internal(key: &str, handler: MergeHandler) -> Result<(), MigrateError> {
+    with_global(|state| {
         state.merge_handlers.insert(key.to_string(), handler);
         Ok(())
-    });
+    })
 }
 
 /// Export a snapshot via the global SDK.
