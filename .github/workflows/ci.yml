@@ -69,7 +69,8 @@ jobs:
           persist-credentials: false
 
       # libavcodec-dev, libavformat-dev etc for ffmpeg-next;
-      # libpipewire-0.3-dev for PipeWire/Wayland capture.
+      # libpipewire-0.3-dev for PipeWire/Wayland capture;
+      # libx11-dev etc for X11 screen capture.
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -77,6 +78,7 @@ jobs:
             libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
             libpostproc-dev libswresample-dev libswscale-dev libx264-dev \
             libpipewire-0.3-dev \
+            libx11-dev libxrandr-dev libxcursor-dev libxi-dev \
             pkg-config protobuf-compiler
 
       - name: Free disk space before ffmpeg build
