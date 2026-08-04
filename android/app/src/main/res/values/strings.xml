@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Nexus</string>
+    <string name="add_host">Add host</string>
+    <string name="host_address_hint">Host address (hostname or 192.168.x.x)</string>
+    <string name="pair_code_hint">6-digit code</string>
+    <string name="discover">Discover</string>
+    <string name="pair">Pair</string>
+</resources>
