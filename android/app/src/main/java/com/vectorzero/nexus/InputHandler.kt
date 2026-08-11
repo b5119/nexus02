@@ -1,9 +1,9 @@
 package com.vectorzero.nexus
 
 import android.view.MotionEvent
-import nexus.stream.v1.StreamServiceProto.InputAction
-import nexus.stream.v1.StreamServiceProto.InputEvent
-import nexus.stream.v1.StreamServiceProto.InputEventType
+import nexus.stream.v1.StreamServiceOuterClass.InputAction
+import nexus.stream.v1.StreamServiceOuterClass.InputEvent
+import nexus.stream.v1.StreamServiceOuterClass.InputEventType
 
 /**
  * Translates Android touch events into InputEvent messages in video-frame

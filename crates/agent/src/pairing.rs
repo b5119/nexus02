@@ -244,6 +244,10 @@ pub struct PairingServer {
     pub code: Arc<PairingCode>,
     pub host_device_id: DeviceId,
     pub host_cert_pem: String,
+    /// Shared-secret token returned to the initiator so it can authenticate
+    /// on the data plane (port 50051) without its own identity cert (the
+    /// Android viewer path — see ADR 0014 Track B).
+    pub auth_token: String,
     pub shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
@@ -262,6 +266,7 @@ impl nexus_proto::pair::v1::pair_service_server::PairService for PairingServer {
                 host_cert_pem: String::new(),
                 host_device_id: String::new(),
                 error_message: "invalid, expired, or already-used code".to_string(),
+                auth_token: String::new(),
             }));
         }
 
@@ -274,6 +279,7 @@ impl nexus_proto::pair::v1::pair_service_server::PairService for PairingServer {
                     host_cert_pem: String::new(),
                     host_device_id: String::new(),
                     error_message: "invalid initiator_device_id".to_string(),
+                    auth_token: String::new(),
                 }));
             }
         };
@@ -303,6 +309,7 @@ impl nexus_proto::pair::v1::pair_service_server::PairService for PairingServer {
             host_cert_pem: self.host_cert_pem.clone(),
             host_device_id: self.host_device_id.to_string(),
             error_message: String::new(),
+            auth_token: self.auth_token.clone(),
         }))
     }
 
@@ -345,6 +352,7 @@ pub async fn run_pairing_listener(port: u16, timeout_secs: u64, display_name: &s
         code: code.clone(),
         host_device_id,
         host_cert_pem: tls.cert_pem.clone(),
+        auth_token: cfg.auth_token.clone(),
         shutdown_tx: Mutex::new(Some(tx)),
     };
 

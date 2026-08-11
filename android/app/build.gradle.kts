@@ -59,17 +59,20 @@ protobuf {
         }
     }
     generateProtoTasks {
-        all().forEach {
-            it.builtins {
-                maybeCreate("kotlin").apply {
+        all().forEach { task ->
+            task.builtins {
+                id("java") {    // REQUIRED: generates the base Java classes
+                    option("lite")
+                }
+                id("kotlin") {  // generates Kotlin extension DSL on top
                     option("lite")
                 }
             }
-            it.plugins {
-                maybeCreate("grpc").apply {
+            task.plugins {
+                id("grpc") {    // Java gRPC service stubs
                     option("lite")
                 }
-                maybeCreate("grpckt").apply {
+                id("grpckt") {  // Kotlin coroutine stubs
                     option("lite")
                 }
             }

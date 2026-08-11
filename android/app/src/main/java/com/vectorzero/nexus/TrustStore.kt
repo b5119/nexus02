@@ -20,15 +20,33 @@ import javax.net.ssl.X509TrustManager
  */
 object TrustStore {
 
-    data class TlsMaterials(val sslContext: SSLContext, val trustManager: X509TrustManager)
-
-    fun buildTlsMaterials(hostCertPem: String): TlsMaterials {
+    fun sslContext(hostCertPem: String): SSLContext {
         val pinned = parsePem(hostCertPem)
         val trustManager = PinnedTrustManager(pinned)
-        val sslContext = SSLContext.getInstance("TLS").apply {
+        return SSLContext.getInstance("TLS").apply {
             init(null, arrayOf(trustManager), SecureRandom())
         }
-        return TlsMaterials(sslContext, trustManager)
+    }
+
+    /**
+     * Trust-on-first-use context for the PAIRING port (50052) only.
+     *
+     * The host cert is unknown before the 6-digit-code exchange, so the
+     * pairing handshake deliberately accepts any certificate; the pairing
+     * listener is authenticated by the short-lived one-time code, not by TLS
+     * identity (ADR 0013). The returned host_cert_pem is then pinned for all
+     * later data-plane connections via [sslContext]. Never use this context
+     * for the data plane.
+     */
+    fun pairingContext(): SSLContext {
+        val trustAll = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+        return SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf(trustAll), SecureRandom())
+        }
     }
 
     private fun parsePem(pem: String): X509Certificate {
@@ -47,10 +65,6 @@ object TrustStore {
         }
 
         override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-            verify(chain)
-        }
-
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?, host: String?) {
             verify(chain)
         }
 

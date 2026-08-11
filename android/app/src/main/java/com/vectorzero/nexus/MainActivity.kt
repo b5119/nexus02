@@ -72,7 +72,7 @@ class MainActivity : AppCompatActivity() {
 
         override fun getItemCount(): Int = items.size
 
-        class Holder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        inner class Holder(itemView: View) : RecyclerView.ViewHolder(itemView) {
             val title: TextView = itemView.findViewById(android.R.id.text1)
             val subtitle: TextView = itemView.findViewById(android.R.id.text2)
         }

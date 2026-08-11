@@ -9,16 +9,23 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import nexus.stream.v1.StreamServiceProto.InputEvent
-import nexus.stream.v1.StreamServiceProto.VideoFrame
+import nexus.stream.v1.StreamServiceOuterClass.InputEvent
+import nexus.stream.v1.StreamServiceOuterClass.VideoFrame
 
 /**
  * Owns the data-plane gRPC stream, the MediaCodec H.264 decoder, and the
  * shared flow that carries touch input back to the host.
+ *
+ * The stream must be restartable: every surface destroy/regenerate cycle
+ * (background→foreground, config changes) tears the codec down in [release]
+ * and re-establishes the stream on the next [connect].
  */
 class StreamViewModel(private val host: PairedHost) : ViewModel() {
 
@@ -38,9 +45,11 @@ class StreamViewModel(private val host: PairedHost) : ViewModel() {
     private val _videoSize = MutableStateFlow<Pair<Int, Int>?>(null)
     val videoSize: StateFlow<Pair<Int, Int>?> = _videoSize
 
-    private var surface: Surface? = null
-    private var codec: MediaCodec? = null
+    @Volatile private var surface: Surface? = null
+    @Volatile private var codec: MediaCodec? = null
     private var connected = false
+    private var streamJob: Job? = null
+    private var codecEpoch = 0
 
     fun setSurface(surface: Surface) {
         this.surface = surface
@@ -53,22 +62,40 @@ class StreamViewModel(private val host: PairedHost) : ViewModel() {
     fun connect() {
         if (connected) return
         connected = true
-        viewModelScope.launch {
-            runCatching {
+        _status.value = "Connecting..."
+        val epoch = codecEpoch
+        streamJob?.cancel()
+        streamJob = viewModelScope.launch(Dispatchers.Default) {
+            try {
                 GrpcClient.stream(host.address, host.certPem, host.authToken, inputFlow)
                     .collect { frame -> decodeFrame(frame) }
-            }.onFailure {
-                _status.value = "Stream ended: ${it.message}"
-                Log.e(TAG, "Stream failed", it)
+                _status.value = "Stream ended"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _status.value = "Stream ended: ${e.message}"
+                Log.e(TAG, "Stream failed", e)
+            } finally {
+                // Only tear the codec down if no newer stream epoch claimed it.
+                if (codecEpoch == epoch) stopCodec()
             }
         }
     }
 
     fun release() {
         surface = null
-        codec?.stop()
-        codec?.release()
+        codecEpoch++
+        streamJob?.cancel()
+        streamJob = null
+        connected = false
+        stopCodec()
+    }
+
+    private fun stopCodec() {
+        val c = codec
         codec = null
+        runCatching { c?.stop() }
+        runCatching { c?.release() }
     }
 
     private fun decodeFrame(frame: VideoFrame) {
@@ -112,7 +139,7 @@ class StreamViewModel(private val host: PairedHost) : ViewModel() {
                     _status.value = "Streaming (${fmt.getInteger(MediaFormat.KEY_WIDTH)}x" +
                         "${fmt.getInteger(MediaFormat.KEY_HEIGHT)})"
                 }
-                out == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> return
+                out == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> continue
                 out >= 0 -> {
                     val render = info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0
                     codec.releaseOutputBuffer(out, render)

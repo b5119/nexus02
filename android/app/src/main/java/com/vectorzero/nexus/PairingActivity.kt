@@ -46,7 +46,7 @@ class PairingActivity : AppCompatActivity() {
             override fun onResolveFailed(serviceInfo: android.net.nsd.NsdServiceInfo, errorCode: Int) {}
             override fun onServiceResolved(serviceInfo: android.net.nsd.NsdServiceInfo) {
                 runOnUiThread {
-                    serviceInfo.host?.hostAddress?.hostAddress?.let { addr ->
+                    serviceInfo.host?.hostAddress?.let { addr ->
                         binding.addressInput.setText(addr)
                     }
                 }
@@ -93,28 +93,32 @@ class PairingActivity : AppCompatActivity() {
         binding.pairButton.isEnabled = false
         binding.statusText.text = "Pairing..."
         lifecycleScope.launch {
-            runCatching { GrpcClient.pair(host, code, deviceId) }
-                .onSuccess { resp ->
-                    if (resp.accepted) {
-                        HostStore.saveHost(
-                            this@PairingActivity,
-                            PairedHost(
-                                id = resp.hostDeviceId,
-                                name = "Nexus host ($host)",
-                                address = host,
-                                hostDeviceId = resp.hostDeviceId,
-                                certPem = resp.hostCertPem,
-                                authToken = resp.authToken
-                            )
+            try {
+                val resp = GrpcClient.pair(host, code, deviceId)
+                if (resp.accepted) {
+                    HostStore.saveHost(
+                        this@PairingActivity,
+                        PairedHost(
+                            id = resp.hostDeviceId,
+                            name = "Nexus host ($host)",
+                            address = host,
+                            hostDeviceId = resp.hostDeviceId,
+                            certPem = resp.hostCertPem,
+                            authToken = resp.authToken
                         )
-                        Toast.makeText(this@PairingActivity, "Paired successfully", Toast.LENGTH_SHORT).show()
-                        finish()
-                    } else {
-                        binding.statusText.text = "Pairing rejected: ${resp.errorMessage}"
-                    }
+                    )
+                    Toast.makeText(this@PairingActivity, "Paired successfully", Toast.LENGTH_SHORT).show()
+                    finish()
+                } else {
+                    binding.statusText.text = "Pairing rejected: ${resp.errorMessage}"
                 }
-                .onFailure { binding.statusText.text = "Pairing failed: ${it.message}" }
-            binding.pairButton.isEnabled = true
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                binding.statusText.text = "Pairing failed: ${e.message}"
+            } finally {
+                if (!isFinishing && !isDestroyed) binding.pairButton.isEnabled = true
+            }
         }
     }
 }

@@ -43,15 +43,23 @@ const CHUNK_SIZE: usize = 64 * 1024; // 64KiB — small enough to keep memory fl
 
 /// Build a combined PEM trust anchor bundle from all paired peer certs.
 /// Returns `None` when the store is empty (rustls rejects an empty root store).
+///
+/// Peers without a real cert (e.g. the Android viewer, which pairs with an
+/// empty `initiator_cert_pem` and authenticates via token) are skipped —
+/// otherwise an all-viewer trust store would yield zero valid CAs and
+/// `client_ca_root` would fail at server startup.
 fn build_peer_ca_pem(peers: &crate::pairing::PeersStore) -> Option<String> {
-    let entries = peers.list();
-    if entries.is_empty() {
-        return None;
-    }
     let mut combined = String::new();
-    for (_, entry) in &entries {
-        combined.push_str(entry.cert_pem.trim());
+    for (_, entry) in &peers.list() {
+        let pem = entry.cert_pem.trim();
+        if pem.is_empty() {
+            continue;
+        }
+        combined.push_str(pem);
         combined.push('\n');
+    }
+    if combined.is_empty() {
+        return None;
     }
     Some(combined)
 }

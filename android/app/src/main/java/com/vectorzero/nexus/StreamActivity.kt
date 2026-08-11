@@ -4,8 +4,11 @@ import android.os.Bundle
 import android.view.SurfaceHolder
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.vectorzero.nexus.databinding.ActivityStreamBinding
+import kotlinx.coroutines.launch
 
 /**
  * Decodes and displays the H.264 stream from the paired host via MediaCodec
@@ -35,9 +38,17 @@ class StreamActivity : AppCompatActivity() {
 
         inputHandler = InputHandler { event -> viewModel.sendInput(event) }
 
-        viewModel.status.observe(this) { binding.statusText.text = it }
-        viewModel.videoSize.observe(this) { size ->
-            if (size != null) inputHandler.setVideoSize(size.first, size.second)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    viewModel.status.collect { binding.statusText.text = it }
+                }
+                launch {
+                    viewModel.videoSize.collect { size ->
+                        if (size != null) inputHandler.setVideoSize(size.first, size.second)
+                    }
+                }
+            }
         }
 
         binding.videoSurface.holder.addCallback(object : SurfaceHolder.Callback {
