@@ -36,7 +36,7 @@ rustls-pki-types = "1"
 # PEM-to-DER parsing for cert fingerprint verification in the mTLS interceptor.
 rustls-pemfile = "2"
 mdns-sd.workspace = true
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 x509-cert = "0.2"
 rustls-webpki = "0.103"
 tokio-rustls = "0.26"

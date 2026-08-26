@@ -105,6 +105,13 @@ fn init_logging() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install the ring crypto provider for rustls 0.23 before any TLS code
+    // runs.  When both aws-lc-rs and ring are compiled in, rustls cannot
+    // auto-detect which one to use and panics.  The `ring` feature is pinned
+    // in Cargo.toml, but call install_default() unconditionally here for
+    // robustness — it is idempotent if another path already set it.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     init_logging();
 
     let args = Args::parse();
