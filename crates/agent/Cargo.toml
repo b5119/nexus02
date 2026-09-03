@@ -14,7 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 nexus-common = { path = "../common" }
 nexus-proto = { path = "../proto" }
-nexus-stream = { path = "../stream" }
+nexus-stream = { path = "../stream", features = ["ffmpeg"] }
 tokio.workspace = true
 tonic.workspace = true
 prost.workspace = true
