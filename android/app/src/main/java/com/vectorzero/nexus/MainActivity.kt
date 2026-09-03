@@ -6,8 +6,8 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.vectorzero.nexus.databinding.ActivityMainBinding
@@ -22,10 +22,10 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        setSupportActionBar(binding.toolbar)
 
         binding.hostList.layoutManager = LinearLayoutManager(this)
         binding.hostList.adapter = adapter
-        binding.hostList.addItemDecoration(DividerItemDecoration(this, LinearLayoutManager.VERTICAL))
 
         binding.addHost.setOnClickListener {
             startActivity(Intent(this, PairingActivity::class.java))
@@ -34,7 +34,24 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        adapter.submit(HostStore.loadHosts(this))
+        val hosts = HostStore.loadHosts(this)
+        adapter.submit(hosts)
+        binding.emptyState.visibility = if (hosts.isEmpty()) View.VISIBLE else View.GONE
+        binding.hostList.visibility = if (hosts.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private fun unpair(host: PairedHost) {
+        AlertDialog.Builder(this)
+            .setMessage(getString(R.string.unpair_confirmation))
+            .setPositiveButton("Unpair") { _, _ ->
+                HostStore.removeHost(this, host.id)
+                val hosts = HostStore.loadHosts(this)
+                adapter.submit(hosts)
+                binding.emptyState.visibility = if (hosts.isEmpty()) View.VISIBLE else View.GONE
+                binding.hostList.visibility = if (hosts.isEmpty()) View.GONE else View.VISIBLE
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private inner class HostAdapter : RecyclerView.Adapter<HostAdapter.Holder>() {
@@ -49,14 +66,16 @@ class MainActivity : AppCompatActivity() {
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
             val v = LayoutInflater.from(parent.context)
-                .inflate(android.R.layout.simple_list_item_2, parent, false)
+                .inflate(R.layout.item_paired_host, parent, false)
             return Holder(v)
         }
 
         override fun onBindViewHolder(holder: Holder, position: Int) {
             val host = items[position]
-            holder.title.text = host.name
-            holder.subtitle.text = host.address
+            holder.name.text = host.name
+            holder.address.text = host.address
+            holder.deviceId.text = host.hostDeviceId.take(8).uppercase().chunked(4).joinToString(" ")
+            holder.avatar.text = host.name.firstOrNull()?.uppercase() ?: "?"
             holder.itemView.setOnClickListener {
                 startActivity(
                     Intent(this@MainActivity, StreamActivity::class.java)
@@ -64,8 +83,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             holder.itemView.setOnLongClickListener {
-                HostStore.removeHost(this@MainActivity, host.id)
-                submit(HostStore.loadHosts(this@MainActivity))
+                unpair(host)
                 true
             }
         }
@@ -73,8 +91,10 @@ class MainActivity : AppCompatActivity() {
         override fun getItemCount(): Int = items.size
 
         inner class Holder(itemView: View) : RecyclerView.ViewHolder(itemView) {
-            val title: TextView = itemView.findViewById(android.R.id.text1)
-            val subtitle: TextView = itemView.findViewById(android.R.id.text2)
+            val name: TextView = itemView.findViewById(R.id.hostName)
+            val address: TextView = itemView.findViewById(R.id.hostAddress)
+            val deviceId: TextView = itemView.findViewById(R.id.hostDeviceId)
+            val avatar: TextView = itemView.findViewById(R.id.hostAvatar)
         }
     }
 }

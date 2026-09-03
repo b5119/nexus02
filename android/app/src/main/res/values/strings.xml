@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Nexus</string>
+    <string name="app_subtitle">Remote desktop viewer</string>
     <string name="add_host">Add host</string>
     <string name="host_address_hint">Host address (hostname or 192.168.x.x)</string>
     <string name="pair_code_hint">6-digit code</string>
     <string name="discover">Discover</string>
     <string name="pair">Pair</string>
+    <string name="no_hosts_title">No hosts yet</string>
+    <string name="no_hosts_body">Tap “Add host” to discover and pair with a Nexus host on your network.</string>
+    <string name="host_avatar">Host</string>
+    <string name="unpair_confirmation">Unpair this host? You will need the pairing code to add it again.</string>
+    <string name="pairing_title">Add a host</string>
+    <string name="pairing_subtitle">Discover a Nexus host on your network, then enter its 6-digit pairing code.</string>
 </resources>

@@ -29,6 +29,8 @@ class PairingActivity : AppCompatActivity() {
         binding = ActivityPairingBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        binding.toolbar.setNavigationOnClickListener { finish() }
+
         binding.discoverButton.setOnClickListener { discover() }
         binding.pairButton.setOnClickListener { pair() }
     }
