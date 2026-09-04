@@ -66,7 +66,29 @@ impl FfmpegEncoder {
         enc.set_time_base((1, 1000));
         enc.set_frame_rate(Some((30, 1)));
 
-        let opened = enc.open_with(Dictionary::new())?;
+        // Target a stable bitrate so bursts of motion don't starve the decoder.
+        // ~0.1 bits/pixel/frame @30fps ≈ 6 Mbps for 1080p.
+        let target_bps = (scaled_w * scaled_h) as u64 * 3_000_000 / (1920 * 1080);
+        enc.set_bit_rate(target_bps as usize);
+
+        // Tune libx264 for real-time remote control:
+        //  - keyint=30: an IDR every ~1 s so a lost frame recovers quickly
+        //    instead of corrupting the picture for ~8 s between default IDRs.
+        //  - min-keyint=30 + scenecut=0: no scene-cut IDRs, strictly periodic
+        //    (stable for low-latency streaming).
+        //  - bframes=0: no B-frame reordering, simplifying decoding on
+        //    limited hardware decoders.
+        //  - repeat-headers=1: emit SPS/PPS with every IDR, so the decoder can
+        //    sync at any IDR even mid-stream.
+        let opts = {
+            let mut d = Dictionary::new();
+            d.set(
+                "x264-params",
+                "keyint=30:min-keyint=30:scenecut=0:bframes=0:repeat-headers=1",
+            );
+            d
+        };
+        let opened = enc.open_with(opts)?;
 
         let scaler = ffmpeg::software::scaling::Context::get(
             format::Pixel::BGRA,
@@ -95,11 +117,18 @@ impl FfmpegEncoder {
         let dst = src.data_mut(0);
         let copy_len = dst.len().min(frame.data.len());
         dst[..copy_len].copy_from_slice(&frame.data[..copy_len]);
+        // PTS in ms units (time_base 1/1000). Advance by the nominal frame
+        // period (~33 ms at 30 fps) so libx264 sees strictly-increasing,
+        // sensibly-spaced timestamps.
         src.set_pts(Some(self.pts));
-        self.pts += 1;
+        self.pts += 33;
 
         let mut yuv =
             frame::Video::new(ffmpeg::format::Pixel::YUV420P, self.scaled_w, self.scaled_h);
+        // sws_scale does not copy PTS to the output frame; without this every
+        // frame sent to the encoder has pts=0, which corrupts libx264's timing
+        // (non-strictly-monotonic PTS) and makes the stream unstable.
+        yuv.set_pts(src.pts());
         self.scaler.run(&src, &mut yuv)?;
 
         self.ctx.send_frame(&yuv)?;

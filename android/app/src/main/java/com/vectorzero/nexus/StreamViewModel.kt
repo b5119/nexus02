@@ -53,6 +53,9 @@ class StreamViewModel(private val host: PairedHost) : ViewModel() {
 
     fun setSurface(surface: Surface) {
         this.surface = surface
+        // Surface changed (e.g. rotation): drop the codec bound to the old
+        // surface; the running stream re-creates it on the next frame.
+        stopCodec()
     }
 
     fun sendInput(event: InputEvent) {

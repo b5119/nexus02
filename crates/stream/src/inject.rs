@@ -41,6 +41,7 @@ mod sys {
 
     pub const REL_X: c_ushort = 0x00;
     pub const REL_Y: c_ushort = 0x01;
+    pub const REL_WHEEL: c_ushort = 0x08;
     pub const ABS_X: c_ushort = 0x00;
     pub const ABS_Y: c_ushort = 0x01;
 
@@ -102,6 +103,7 @@ impl Injector {
 
                 ioctl_set(raw_fd, sys::UI_SET_RELBIT, sys::REL_X as i32)?;
                 ioctl_set(raw_fd, sys::UI_SET_RELBIT, sys::REL_Y as i32)?;
+                ioctl_set(raw_fd, sys::UI_SET_RELBIT, sys::REL_WHEEL as i32)?;
 
                 ioctl_set(raw_fd, sys::UI_SET_ABSBIT, sys::ABS_X as i32)?;
                 ioctl_set(raw_fd, sys::UI_SET_ABSBIT, sys::ABS_Y as i32)?;
@@ -209,6 +211,10 @@ impl Injector {
                         _ => return Ok(()),
                     };
                     self.write_ev(sys::EV_KEY, btn, 0)?;
+                    self.sync()?;
+                }
+                a if a == InputAction::Scroll as i32 => {
+                    self.write_ev(sys::EV_REL, sys::REL_WHEEL, event.scroll_delta)?;
                     self.sync()?;
                 }
                 _ => {}

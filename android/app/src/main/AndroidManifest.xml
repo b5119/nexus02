@@ -28,7 +28,6 @@
         <activity
             android:name=".StreamActivity"
             android:exported="false"
-            android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize" />
     </application>
 
