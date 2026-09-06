@@ -235,9 +235,7 @@ mod pipewire_capture {
                 .as_ref()
                 .add_listener_local()
                 .error(|id, seq, res, message| {
-                    tracing::error!(
-                        "pipewire core error id={id} seq={seq} res={res}: {message}"
-                    );
+                    tracing::error!("pipewire core error id={id} seq={seq} res={res}: {message}");
                 })
                 .register();
 
@@ -312,14 +310,13 @@ mod pipewire_capture {
                     }
                 ),
             );
-            let values: Vec<u8> =
-                pw::spa::pod::serialize::PodSerializer::serialize(
-                    std::io::Cursor::new(Vec::new()),
-                    &pw::spa::pod::Value::Object(fmt),
-                )
-                .context("failed to serialize PipeWire format param")?
-                .0
-                .into_inner();
+            let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+                std::io::Cursor::new(Vec::new()),
+                &pw::spa::pod::Value::Object(fmt),
+            )
+            .context("failed to serialize PipeWire format param")?
+            .0
+            .into_inner();
             let mut params = [pw::spa::pod::Pod::from_bytes(&values)
                 .context("failed to build PipeWire format pod")?];
 
