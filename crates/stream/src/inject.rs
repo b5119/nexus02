@@ -26,8 +26,6 @@ mod sys {
     use std::os::raw::{c_int, c_uint, c_ushort};
 
     pub const UI_DEV_CREATE: c_uint = 0x5501u32;
-    #[allow(dead_code)]
-    pub const UI_DEV_DESTROY: c_uint = 0x5502u32;
     pub const UI_SET_EVBIT: c_uint = 0x40045564u32;
     pub const UI_SET_KEYBIT: c_uint = 0x40045565u32;
     pub const UI_SET_RELBIT: c_uint = 0x40045566u32;
@@ -327,6 +325,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 button: 0,
+                scroll_delta: 0,
             };
             assert!(
                 injector.inject(&event).is_ok(),

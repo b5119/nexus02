@@ -110,7 +110,7 @@ impl PeersStore {
 
     /// Open a PeersStore backed by `dir/peers.json`.
     /// Useful for testing or non-default config locations.
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "test-only API")]
     pub fn open_in(dir: &std::path::Path) -> Result<Self> {
         let path = dir.join("peers.json");
         let inner = if path.exists() {
@@ -145,25 +145,9 @@ impl PeersStore {
         })
     }
 
-    #[allow(dead_code)]
-    pub fn get(&self, device_id: &DeviceId) -> Option<PeerEntry> {
-        let map = self.inner.lock().unwrap();
-        map.peers.get(&device_id.to_string()).cloned()
-    }
-
-    #[allow(dead_code)]
     pub fn contains(&self, device_id: &DeviceId) -> bool {
         let map = self.inner.lock().unwrap();
         map.peers.contains_key(&device_id.to_string())
-    }
-
-    #[allow(dead_code)]
-    pub fn verify_cert(&self, device_id: &DeviceId, cert_pem: &str) -> bool {
-        let map = self.inner.lock().unwrap();
-        match map.peers.get(&device_id.to_string()) {
-            Some(entry) => entry.cert_pem == cert_pem,
-            None => false,
-        }
     }
 
     /// Verify a DER-encoded client certificate against the stored PEM for
