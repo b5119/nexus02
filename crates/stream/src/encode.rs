@@ -68,7 +68,7 @@ impl FfmpegEncoder {
 
         // Target a stable bitrate so bursts of motion don't starve the decoder.
         // ~0.1 bits/pixel/frame @30fps ≈ 6 Mbps for 1080p.
-        let target_bps = (scaled_w * scaled_h) as u64 * 3_000_000 / (1920 * 1080);
+        let target_bps = (scaled_w * scaled_h) as u64 * 6_000_000 / (1920 * 1080);
         enc.set_bit_rate(target_bps as usize);
 
         // Tune libx264 for real-time remote control:

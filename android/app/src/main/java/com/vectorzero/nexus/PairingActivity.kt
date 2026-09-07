@@ -40,6 +40,11 @@ class PairingActivity : AppCompatActivity() {
         stopDiscovery()
     }
 
+    override fun onSupportNavigateUp(): Boolean {
+        onBackPressedDispatcher.onBackPressed()
+        return true
+    }
+
     private fun discover() {
         val nsdManager = getSystemService(NSD_SERVICE) as android.net.nsd.NsdManager
         binding.statusText.text = "Discovering nexus hosts..."

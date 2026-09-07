@@ -56,6 +56,9 @@ class StreamViewModel(private val host: PairedHost) : ViewModel() {
         // Surface changed (e.g. rotation): drop the codec bound to the old
         // surface; the running stream re-creates it on the next frame.
         stopCodec()
+        // Reset connected so connect() will restart the codec
+        // pipeline when the new surface is ready after rotation.
+        if (streamJob?.isActive == true) connected = false
     }
 
     fun sendInput(event: InputEvent) {
