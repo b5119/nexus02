@@ -386,14 +386,16 @@ mod pipewire_capture {
 
         pub fn capture_frame(&mut self) -> Result<CapturedFrame> {
             // Try to dequeue from the shared buffer updated by the pump thread.
-            let deadline = Instant::now() + Duration::from_millis(100);
+            // Use a shorter timeout (50ms) to avoid returning blank frames during
+            // transient hiccups. At 30fps we need a frame every ~33ms.
+            let deadline = Instant::now() + Duration::from_millis(50);
             loop {
                 if let Some(frame) = self.frame_buffer.lock().unwrap().take() {
                     return Ok(frame);
                 }
                 if Instant::now() >= deadline {
-                    // No frame yet; still negotiating. Return a blank frame so
-                    // the pipeline stays alive instead of stalling.
+                    // No frame yet; return a blank frame so the pipeline stays alive
+                    // instead of stalling. This should be rare once streaming is stable.
                     let data = vec![0u8; (self.width * self.height * 4) as usize];
                     return Ok(CapturedFrame {
                         data,

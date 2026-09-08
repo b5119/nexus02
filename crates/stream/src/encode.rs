@@ -67,24 +67,25 @@ impl FfmpegEncoder {
         enc.set_frame_rate(Some((30, 1)));
 
         // Target a stable bitrate so bursts of motion don't starve the decoder.
-        // ~0.1 bits/pixel/frame @30fps ≈ 6 Mbps for 1080p.
-        let target_bps = (scaled_w * scaled_h) as u64 * 6_000_000 / (1920 * 1080);
+        // ~0.15 bits/pixel/frame @30fps ≈ 10 Mbps for 1080p.
+        let target_bps = (scaled_w * scaled_h) as u64 * 10_000_000 / (1920 * 1080);
         enc.set_bit_rate(target_bps as usize);
 
         // Tune libx264 for real-time remote control:
-        //  - keyint=30: an IDR every ~1 s so a lost frame recovers quickly
-        //    instead of corrupting the picture for ~8 s between default IDRs.
-        //  - min-keyint=30 + scenecut=0: no scene-cut IDRs, strictly periodic
+        //  - keyint=15: an IDR every ~0.5 s so a lost frame recovers quickly
+        //    instead of corrupting the picture for ~1-2 s between default IDRs.
+        //  - min-keyint=15 + scenecut=0: no scene-cut IDRs, strictly periodic
         //    (stable for low-latency streaming).
         //  - bframes=0: no B-frame reordering, simplifying decoding on
         //    limited hardware decoders.
         //  - repeat-headers=1: emit SPS/PPS with every IDR, so the decoder can
         //    sync at any IDR even mid-stream.
+        //  - vbv-bufsize/vbv-maxrate: constrain bitrate spikes for network stability.
         let opts = {
             let mut d = Dictionary::new();
             d.set(
                 "x264-params",
-                "keyint=30:min-keyint=30:scenecut=0:bframes=0:repeat-headers=1",
+                "keyint=15:min-keyint=15:scenecut=0:bframes=0:repeat-headers=1:vbv-bufsize=2000:vbv-maxrate=10000",
             );
             d
         };
