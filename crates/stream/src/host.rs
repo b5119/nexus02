@@ -52,7 +52,7 @@ impl StreamService for StreamHostService {
                 while let Some(ev_result) = input_stream.next().await {
                     match ev_result {
                         Ok(ev) => {
-                            if let Err(e) = injector_clone.blocking_lock().inject(&ev) {
+                            if let Err(e) = injector_clone.lock().await.inject(&ev) {
                                 tracing::warn!("input injection failed: {e:#}");
                             }
                         }
@@ -70,6 +70,11 @@ impl StreamService for StreamHostService {
             let mut capture = capture.lock().await;
             let fps = capture.fps();
             let mut interval = tokio::time::interval(std::time::Duration::from_secs_f64(1.0 / fps));
+            // Monotonic start instant so frame timestamps are small, increasing
+            // values (ms since stream start) that map cleanly to MediaCodec's
+            // presentationTimeUs (µs), instead of huge Unix-epoch wall-clock
+            // values that make hardware decoders reset and flicker.
+            let start = std::time::Instant::now();
 
             loop {
                 interval.tick().await;
@@ -92,10 +97,7 @@ impl StreamService for StreamHostService {
 
                 seq += 1;
 
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
+                let ts = start.elapsed().as_millis() as u64;
 
                 let vf = VideoFrame {
                     sequence: seq,

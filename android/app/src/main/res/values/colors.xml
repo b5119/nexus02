@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="stream_overlay_text">#CCFFFFFF</color>
+
+    <!-- Brand palette (cool indigo/blue, works in day + night via -night overlap) -->
+    <color name="nexus_primary">#3D5AFE</color>
+    <color name="nexus_on_primary">#FFFFFF</color>
+    <color name="nexus_primary_container">#DCE1FF</color>
+    <color name="nexus_on_primary_container">#00105C</color>
+    <color name="nexus_secondary">#575E72</color>
+    <color name="nexus_on_secondary">#FFFFFF</color>
+    <color name="nexus_surface">#FEF7FF</color>
+    <color name="nexus_on_surface">#1B1B1F</color>
+    <color name="nexus_surface_variant">#E1E2EC</color>
+    <color name="nexus_on_surface_variant">#44474F</color>
+    <color name="nexus_outline">#74777F</color>
+    <color name="nexus_background">#FEF7FF</color>
+    <color name="nexus_on_background">#1B1B1F</color>
+</resources>

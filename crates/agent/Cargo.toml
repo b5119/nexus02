@@ -14,7 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 nexus-common = { path = "../common" }
 nexus-proto = { path = "../proto" }
-nexus-stream = { path = "../stream" }
+nexus-stream = { path = "../stream", features = ["ffmpeg"] }
 tokio.workspace = true
 tonic.workspace = true
 prost.workspace = true
@@ -36,7 +36,7 @@ rustls-pki-types = "1"
 # PEM-to-DER parsing for cert fingerprint verification in the mTLS interceptor.
 rustls-pemfile = "2"
 mdns-sd.workspace = true
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 x509-cert = "0.2"
 rustls-webpki = "0.103"
 tokio-rustls = "0.26"

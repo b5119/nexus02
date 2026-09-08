@@ -97,6 +97,9 @@ fn main() -> Result<()> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Ensure rustls has an installed CryptoProvider before any TLS code runs.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

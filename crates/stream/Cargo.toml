@@ -34,6 +34,8 @@ tokio-stream.workspace = true
 futures-util.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 mdns-sd.workspace = true
+# Crypto provider installation at startup (rustls 0.23 requires explicit selection).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11 = { version = "2.21", features = ["xlib"] }

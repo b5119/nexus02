@@ -19,20 +19,51 @@ path-escape rejection as a plain "not found" (flagged by Copilot, fixed + tested
 So bot review is a genuine part of the quality bar, alongside the CI gates
 (build + test, fmt, clippy) and branch protection on `main`.
 
-## Current milestone: Layer 2 (filesystem virtualization)
+## Current milestone: Layer 1 (remote control / screen streaming)
+
+Goal: stream the host's screen to a paired tablet/phone and forward touch/keyboard/mouse input back — full remote control.
+
+```
+┌─────────────┐   gRPC (StreamService)   ┌──────────────┐
+│   Tablet      │ ─────────────────────> │  Dell/Linux    │
+│ Nexus Viewer  │  H.264 video + input   │  nexus-agent   │
+│  (viewer)     │ <───────────────────── │  (host)        │
+└─────────────┘                         └──────────────┘
+```
+
+**Status (branch `feat/android-viewer`):**
+
+- [x] **Screen capture on Wayland** via portal PipeWire screencast (no X11 fallback).
+  - Connects to the portal session's PipeWire remote (not the default instance) so buffers actually arrive.
+  - Negotiates a real video format (BGRA/BGRx/RGBA/RGBx + size + framerate) and pumps the main loop so the screencast node starts streaming.
+  - Verified: diagnostic harness shows ~96% non-black frames with real desktop pixel values.
+- [x] **H.264 encoding** via `libx264` (ffmpeg-next) tuned for real-time:
+  - IDR every ~1s (`keyint=30`), no B-frames (`bframes=0`), in-band SPS/PPS (`repeat-headers=1`), explicit ~6 Mbps bitrate.
+- [x] **Fixed encoder PTS bug**: the scaler (`sws_scale`) does not copy timestamps; every frame reached libx264 with `pts=0`, causing `non-strictly-monotonic PTS` spam and a flickering stream. Now the scaled frame inherits the source PTS and advances by the nominal frame period (~33 ms).
+- [x] **Streaming gRPC** (bidirectional): `VideoFrame` from host, `InputEvent` from viewer.
+- [x] **Android viewer app** (Kotlin, MediaCodec decoder, Material 3 UI):
+  - Discovers hosts via mDNS (`_nexus._tcp`), pairs with a one-time 6-digit code (TLS trust-on-first-use).
+  - **Touch mode**: absolute coordinates (tap = click).
+  - **Pointer mode**: relative mouse (drag moves cursor, tap = left click, long-press = right click), two-finger scroll.
+  - **Keyboard forwarding**: hardware/soft keyboard → Linux evdev keycodes.
+  - **Auto-rotate + aspect fit/fill**: video letterboxes to stream aspect ratio; FAB toggles Fit ↔ Fill; stream survives rotation without full reconnect.
+  - Polished UI: themed toolbar, host list with avatars, empty state, unpair confirmation, styled pairing screen.
+- [x] **End-to-end tested**: tablet (IN-101, Android 14) paired with Dell (Wayland/GNOME, PipeWire), streaming 1920×1080 @ 30 fps stable, touch/pointer/keyboard/scroll all functional.
+
+**Not yet / open:**
+- [ ] **Always-on host**: systemd user service / autostart so `serve --enable-streaming` runs on login; portal grant persistence (GNOME re-prompts per session currently).
+- [ ] **Tablet auto-connect**: on app open, skip discover/pair and immediately stream to last-paired host.
+- [ ] **Perf tuning**: adaptive bitrate/quality based on network, HW encoder (QSV/VAAPI) detection and fallback.
+- [ ] **Clipboard sync** (text, image).
+- [ ] **Multiple monitors** (select source, or composite).
+
+---
+
+### Layer 2 (filesystem virtualization)
 
 Goal: mount a phone's storage on a Linux laptop as a real, lazy-loaded
 FUSE filesystem — `ls`, `cat`, `cp` all work against it like it's a
 local directory, but nothing is actually copied until read.
-
-```
-┌─────────────┐   gRPC (FileService)   ┌──────────────┐
-│   Android    │ ─────────────────────> │  Dell/Linux   │
-│ nexus-agent  │  ListDir/Stat/ReadFile │  nexus-agent   │
-│  (HOST)      │ <───────────────────── │  nexus-fs      │
-└─────────────┘                        │  (FUSE mount)  │
-                                        └──────────────┘
-```
 
 ## Workspace layout
 
@@ -132,7 +163,9 @@ cross-compiled binary you can push via `adb` for testing.
       directory-level conflicts are still open.
 - [ ] Full pairing / control plane (device identity, revocation, key rotation)
       — ADR 0004 is only the shared-secret step, not this
-- [ ] Layer 1 (remote control / streaming) — not started
+- [x] Layer 1 (remote control / streaming) — core streaming + input working
+      (see `feat/android-viewer` branch); open items: always-on host, auto-connect,
+      adaptive bitrate, clipboard, multi-monitor.
 - [ ] Layer 4 (app-cooperative migration SDK) — not started
 
 ### Open question: packaging the agent as a real Android app
