@@ -52,7 +52,7 @@ impl StreamService for StreamHostService {
                 while let Some(ev_result) = input_stream.next().await {
                     match ev_result {
                         Ok(ev) => {
-                            if let Err(e) = injector_clone.blocking_lock().inject(&ev) {
+                            if let Err(e) = injector_clone.lock().await.inject(&ev) {
                                 tracing::warn!("input injection failed: {e:#}");
                             }
                         }
