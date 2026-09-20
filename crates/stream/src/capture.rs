@@ -135,7 +135,7 @@ mod pipewire_capture {
         fn try_push(&mut self, frame: CapturedFrame) -> bool {
             let head = self.head.load(Ordering::Acquire);
             let next_head = (head + 1) % self.capacity;
-            
+
             // Check if buffer is full (next_head would catch up to tail)
             if next_head == self.tail.load(Ordering::Acquire) {
                 return false; // buffer full
@@ -155,7 +155,8 @@ mod pipewire_capture {
             }
 
             let frame = self.buffer[tail].take();
-            self.tail.store((tail + 1) % self.capacity, Ordering::Release);
+            self.tail
+                .store((tail + 1) % self.capacity, Ordering::Release);
             frame
         }
 
@@ -205,7 +206,7 @@ mod pipewire_capture {
         _context: pw::context::ContextBox<'static>,
         _main_loop: MainLoopBox,
     }
-impl PipeWireCapture {
+    impl PipeWireCapture {
         pub fn new(fps: f64) -> Result<Self> {
             // Lock-free ring buffer for frame passing (producer=PipeWire thread, consumer=encode thread)
             // Capacity of 8 frames: enough to absorb jitter without excessive memory

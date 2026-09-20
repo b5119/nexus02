@@ -97,7 +97,7 @@ impl FfmpegEncoder {
             );
             d
         };
-        
+
         // Add encoder options via Dictionary (not x264-params)
         opts.set("preset", "ultrafast");
         opts.set("tune", "zerolatency");
@@ -152,7 +152,9 @@ impl FfmpegEncoder {
         let mut pkt = packet::Packet::empty();
         let data = match self.ctx.receive_packet(&mut pkt) {
             Ok(()) => pkt.data().unwrap_or(&[]).to_vec(),
-            Err(Error::Other { errno: error::EAGAIN }) => vec![],
+            Err(Error::Other {
+                errno: error::EAGAIN,
+            }) => vec![],
             Err(e) => anyhow::bail!("encode receive_packet: {e}"),
         };
 
