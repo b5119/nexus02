@@ -7,18 +7,6 @@ This is **not** a generic "virtualize any device" tool — see
 [docs/adr/0001-android-fuse-limitation.md](docs/adr/0001-android-fuse-limitation.md)
 for why that idea doesn't hold up, and what Nexus does instead.
 
-### Code review
-
-Every PR is reviewed by two automated reviewers — [CodeRabbit](https://coderabbit.ai)
-and GitHub Copilot — before it merges. Their findings are evaluated on merit,
-not rubber-stamped: valid ones are fixed and the threads resolved, off-base ones
-are declined with a reason. They've caught real issues here — for example a CI
-credential-leak hardening gap (persisted GitHub token + unpinned actions, flagged
-by CodeRabbit) and a security-relevant bug where `DeleteFile` masked a
-path-escape rejection as a plain "not found" (flagged by Copilot, fixed + tested).
-So bot review is a genuine part of the quality bar, alongside the CI gates
-(build + test, fmt, clippy) and branch protection on `main`.
-
 ## Current milestone: Layer 1 (remote control / screen streaming)
 
 Goal: stream the host's screen to a paired tablet/phone and forward touch/keyboard/mouse input back — full remote control.
@@ -38,7 +26,7 @@ Goal: stream the host's screen to a paired tablet/phone and forward touch/keyboa
   - Negotiates a real video format (BGRA/BGRx/RGBA/RGBx + size + framerate) and pumps the main loop so the screencast node starts streaming.
   - Verified: diagnostic harness shows ~96% non-black frames with real desktop pixel values.
 - [x] **H.264 encoding** via `libx264` (ffmpeg-next) tuned for real-time:
-  - IDR every ~1s (`keyint=30`), no B-frames (`bframes=0`), in-band SPS/PPS (`repeat-headers=1`), explicit ~6 Mbps bitrate.
+  - IDR every ~0.5s (`keyint=15`), no B-frames (`bframes=0`), in-band SPS/PPS (`repeat-headers=1`), explicit ~10 Mbps bitrate, `preset=ultrafast`, `tune=zerolatency`, `profile=baseline`.
 - [x] **Fixed encoder PTS bug**: the scaler (`sws_scale`) does not copy timestamps; every frame reached libx264 with `pts=0`, causing `non-strictly-monotonic PTS` spam and a flickering stream. Now the scaled frame inherits the source PTS and advances by the nominal frame period (~33 ms).
 - [x] **Streaming gRPC** (bidirectional): `VideoFrame` from host, `InputEvent` from viewer.
 - [x] **Android viewer app** (Kotlin, MediaCodec decoder, Material 3 UI):

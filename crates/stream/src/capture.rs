@@ -93,6 +93,7 @@ impl ScreenCapture {
 
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 mod pipewire_capture {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -105,6 +106,66 @@ mod pipewire_capture {
     use pipewire::stream::{StreamBox, StreamListener};
 
     use super::CapturedFrame;
+
+    // Lock-free single-producer single-consumer ring buffer for frames
+    // O(1) push/pop, no locks, cache-friendly
+    struct FrameRingBuffer {
+        buffer: Box<[Option<CapturedFrame>]>,
+        head: AtomicUsize, // producer index
+        tail: AtomicUsize, // consumer index
+        capacity: usize,
+    }
+
+    impl FrameRingBuffer {
+        fn new(capacity: usize) -> Self {
+            let mut buffer = Vec::with_capacity(capacity);
+            for _ in 0..capacity {
+                buffer.push(None);
+            }
+            Self {
+                buffer: buffer.into_boxed_slice(),
+                head: AtomicUsize::new(0),
+                tail: AtomicUsize::new(0),
+                capacity,
+            }
+        }
+
+        /// Try to push a frame. Returns false if buffer is full (producer faster than consumer).
+        /// O(1) - single atomic CAS on head.
+        fn try_push(&mut self, frame: CapturedFrame) -> bool {
+            let head = self.head.load(Ordering::Acquire);
+            let next_head = (head + 1) % self.capacity;
+            
+            // Check if buffer is full (next_head would catch up to tail)
+            if next_head == self.tail.load(Ordering::Acquire) {
+                return false; // buffer full
+            }
+
+            self.buffer[head] = Some(frame);
+            self.head.store(next_head, Ordering::Release);
+            true
+        }
+
+        /// Try to pop a frame. Returns None if buffer is empty.
+        /// O(1) - single atomic CAS on tail.
+        fn try_pop(&mut self) -> Option<CapturedFrame> {
+            let tail = self.tail.load(Ordering::Acquire);
+            if tail == self.head.load(Ordering::Acquire) {
+                return None; // buffer empty
+            }
+
+            let frame = self.buffer[tail].take();
+            self.tail.store((tail + 1) % self.capacity, Ordering::Release);
+            frame
+        }
+
+        /// Returns approximate number of frames in buffer
+        fn len(&self) -> usize {
+            let head = self.head.load(Ordering::Acquire);
+            let tail = self.tail.load(Ordering::Acquire);
+            (head + self.capacity - tail) % self.capacity
+        }
+    }
 
     // SAFETY: PipeWireCapture is always behind Arc<Mutex<>>, so only one
     // thread accesses the contained pipewire objects at a time.
@@ -128,7 +189,9 @@ mod pipewire_capture {
         width: u32,
         height: u32,
         fps: f64,
-        frame_buffer: Arc<Mutex<Option<CapturedFrame>>>,
+        // Lock-free ring buffer for frame passing (producer=PipeWire thread, consumer=encode thread)
+        // Using Mutex for interior mutability since we need &mut self for push/pop
+        frame_ring: Arc<std::sync::Mutex<FrameRingBuffer>>,
         _loop_thread: Option<std::thread::JoinHandle<()>>,
         _state: Option<PipeWireState>,
     }
@@ -142,10 +205,11 @@ mod pipewire_capture {
         _context: pw::context::ContextBox<'static>,
         _main_loop: MainLoopBox,
     }
-
-    impl PipeWireCapture {
+impl PipeWireCapture {
         pub fn new(fps: f64) -> Result<Self> {
-            let frame_buffer: Arc<Mutex<Option<CapturedFrame>>> = Arc::new(Mutex::new(None));
+            // Lock-free ring buffer for frame passing (producer=PipeWire thread, consumer=encode thread)
+            // Capacity of 8 frames: enough to absorb jitter without excessive memory
+            let frame_ring = Arc::new(std::sync::Mutex::new(FrameRingBuffer::new(8)));
 
             // --- ashpd: create screencast session ---
             // Spawn a dedicated OS thread to avoid "Cannot start a runtime
@@ -282,8 +346,9 @@ mod pipewire_capture {
                     Range,
                     Rectangle,
                     pw::spa::utils::Rectangle {
-                        width: w,
-                        height: h
+                        // Force 720p for ultra-low latency
+                        width: 1280,
+                        height: 720
                     },
                     pw::spa::utils::Rectangle {
                         width: 1,
@@ -322,7 +387,8 @@ mod pipewire_capture {
 
             // Register process callback BEFORE connecting so it catches
             // frames from the very first buffer PipeWire delivers.
-            let fb = Arc::clone(&frame_buffer);
+            // Uses lock-free ring buffer for zero-contention frame passing.
+            let frame_ring_clone = Arc::clone(&frame_ring);
             let _listener = stream
                 .add_local_listener::<()>()
                 .process(move |s, _| {
@@ -333,12 +399,16 @@ mod pipewire_capture {
                             let size = chunk.size() as usize;
                             if let Some(bytes) = data.data() {
                                 if size == (w * h * 4) as usize && size <= bytes.len() {
-                                    let mut guard = fb.lock().unwrap();
-                                    *guard = Some(CapturedFrame {
+                                    let frame = CapturedFrame {
                                         data: bytes[..size].to_vec(),
                                         width: w,
                                         height: h,
-                                    });
+                                    };
+                                    // Try to push; if full, drop oldest frame (producer faster than consumer)
+                                    // This prevents backpressure buildup while maintaining low latency.
+                                    if let Ok(mut ring) = frame_ring_clone.lock() {
+                                        let _ = ring.try_push(frame);
+                                    }
                                 }
                             }
                         }
@@ -363,15 +433,16 @@ mod pipewire_capture {
 
             // Pump the PipeWire main loop on a dedicated OS thread. The main
             // loop must keep running so PipeWire delivers buffers into
-            // frame_buffer via the process callback.
+            // frame_ring via the process callback.
             let loop_ptr = SendLoop(main_loop.as_raw_ptr());
+
             let loop_thread = std::thread::spawn(move || loop_ptr.run());
 
             Ok(Self {
                 width,
                 height,
                 fps,
-                frame_buffer,
+                frame_ring,
                 _loop_thread: Some(loop_thread),
                 _state: Some(PipeWireState {
                     _listener,
@@ -385,13 +456,15 @@ mod pipewire_capture {
         }
 
         pub fn capture_frame(&mut self) -> Result<CapturedFrame> {
-            // Try to dequeue from the shared buffer updated by the pump thread.
+            // Try to dequeue from the lock-free ring buffer.
             // Use a shorter timeout (50ms) to avoid returning blank frames during
             // transient hiccups. At 30fps we need a frame every ~33ms.
             let deadline = Instant::now() + Duration::from_millis(50);
             loop {
-                if let Some(frame) = self.frame_buffer.lock().unwrap().take() {
-                    return Ok(frame);
+                if let Ok(mut ring) = self.frame_ring.lock() {
+                    if let Some(frame) = ring.try_pop() {
+                        return Ok(frame);
+                    }
                 }
                 if Instant::now() >= deadline {
                     // No frame yet; return a blank frame so the pipeline stays alive

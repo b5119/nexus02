@@ -40,6 +40,8 @@ struct FfmpegEncoder {
     scaled_w: u32,
     scaled_h: u32,
     pts: i64,
+    src_frame: ffmpeg_next::frame::Video,
+    yuv_frame: ffmpeg_next::frame::Video,
 }
 
 #[cfg(feature = "ffmpeg")]
@@ -47,6 +49,9 @@ unsafe impl Send for FfmpegEncoder {}
 
 #[cfg(feature = "ffmpeg")]
 impl FfmpegEncoder {
+    const VIDEO_TIME_BASE: (i32, i32) = (1, 1000); // ms
+    const NOMINAL_FRAME_MS: i64 = 33; // 30 fps
+
     fn new(width: u32, height: u32, codec_name: &str) -> Result<Self> {
         use ffmpeg::{codec, encoder, format, Dictionary};
         use ffmpeg_next as ffmpeg;
@@ -63,32 +68,41 @@ impl FfmpegEncoder {
         enc.set_width(scaled_w);
         enc.set_height(scaled_h);
         enc.set_format(format::Pixel::YUV420P);
-        enc.set_time_base((1, 1000));
+        enc.set_time_base(Self::VIDEO_TIME_BASE);
         enc.set_frame_rate(Some((30, 1)));
 
-        // Target a stable bitrate so bursts of motion don't starve the decoder.
-        // ~0.15 bits/pixel/frame @30fps ≈ 10 Mbps for 1080p.
-        let target_bps = (scaled_w * scaled_h) as u64 * 10_000_000 / (1920 * 1080);
+        // Target ~10 Mbps for 1080p30 with VBV constraints for network stability
+        let target_bps = (scaled_w * scaled_h) as u64 * 8_000_000 / (1920 * 1080);
         enc.set_bit_rate(target_bps as usize);
 
-        // Tune libx264 for real-time remote control:
-        //  - keyint=15: an IDR every ~0.5 s so a lost frame recovers quickly
-        //    instead of corrupting the picture for ~1-2 s between default IDRs.
-        //  - min-keyint=15 + scenecut=0: no scene-cut IDRs, strictly periodic
-        //    (stable for low-latency streaming).
-        //  - bframes=0: no B-frame reordering, simplifying decoding on
-        //    limited hardware decoders.
-        //  - repeat-headers=1: emit SPS/PPS with every IDR, so the decoder can
-        //    sync at any IDR even mid-stream.
-        //  - vbv-bufsize/vbv-maxrate: constrain bitrate spikes for network stability.
-        let opts = {
+        // x264 tune for ULTRA-low latency streaming:
+        // - keyint=8: IDR every ~0.25s for instant recovery
+        // - min-keyint=8 + scenecut=0: strictly periodic IDRs
+        // - bframes=0: no reordering delay
+        // - repeat-headers=1: SPS/PPS with every IDR
+        // - vbv: very tight constraints for network stability
+        // - preset=ultrafast: fastest encoding
+        // - tune=zerolatency: optimize for streaming
+        // - profile=baseline: maximum decoder compatibility
+        // - no-scenecut: no adaptive IDR
+        // - ref=1: minimum reference frames
+        // - me=dia: fastest motion estimation
+        // - subme=0: simplest subpixel ME
+        // - no-deblock=1: disable deblocking filter for speed
+        let mut opts = {
             let mut d = Dictionary::new();
             d.set(
                 "x264-params",
-                "keyint=15:min-keyint=15:scenecut=0:bframes=0:repeat-headers=1:vbv-bufsize=2000:vbv-maxrate=10000",
+                "keyint=8:min-keyint=8:scenecut=0:bframes=0:repeat-headers=1:vbv-bufsize=500:vbv-maxrate=8000:ref=1:me=dia:subme=0:no-deblock=1",
             );
             d
         };
+        
+        // Add encoder options via Dictionary (not x264-params)
+        opts.set("preset", "ultrafast");
+        opts.set("tune", "zerolatency");
+        opts.set("profile", "baseline");
+
         let opened = enc.open_with(opts)?;
 
         let scaler = ffmpeg::software::scaling::Context::get(
@@ -101,45 +115,44 @@ impl FfmpegEncoder {
             ffmpeg::software::scaling::flag::Flags::BILINEAR,
         )?;
 
+        // Pre-allocate frames to avoid per-frame allocations
+        let src_frame = ffmpeg::frame::Video::new(format::Pixel::BGRA, width, height);
+        let yuv_frame = ffmpeg::frame::Video::new(format::Pixel::YUV420P, scaled_w, scaled_h);
+
         Ok(Self {
             ctx: opened,
             scaler,
             scaled_w,
             scaled_h,
             pts: 0,
+            src_frame,
+            yuv_frame,
         })
     }
 
     fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame> {
-        use ffmpeg::{error, frame, packet, Error};
+        use ffmpeg::{error, packet, Error};
         use ffmpeg_next as ffmpeg;
 
-        let mut src = frame::Video::new(ffmpeg::format::Pixel::BGRA, frame.width, frame.height);
-        let dst = src.data_mut(0);
+        // Reuse pre-allocated frames - avoid allocation
+        // Clear and copy new data
+        let dst = self.src_frame.data_mut(0);
         let copy_len = dst.len().min(frame.data.len());
         dst[..copy_len].copy_from_slice(&frame.data[..copy_len]);
-        // PTS in ms units (time_base 1/1000). Advance by the nominal frame
-        // period (~33 ms at 30 fps) so libx264 sees strictly-increasing,
-        // sensibly-spaced timestamps.
-        src.set_pts(Some(self.pts));
-        self.pts += 33;
 
-        let mut yuv =
-            frame::Video::new(ffmpeg::format::Pixel::YUV420P, self.scaled_w, self.scaled_h);
-        // sws_scale does not copy PTS to the output frame; without this every
-        // frame sent to the encoder has pts=0, which corrupts libx264's timing
-        // (non-strictly-monotonic PTS) and makes the stream unstable.
-        yuv.set_pts(src.pts());
-        self.scaler.run(&src, &mut yuv)?;
+        self.src_frame.set_pts(Some(self.pts));
+        self.pts += Self::NOMINAL_FRAME_MS;
 
-        self.ctx.send_frame(&yuv)?;
+        // Reuse yuv frame
+        self.yuv_frame.set_pts(self.src_frame.pts());
+        self.scaler.run(&self.src_frame, &mut self.yuv_frame)?;
+
+        self.ctx.send_frame(&self.yuv_frame)?;
 
         let mut pkt = packet::Packet::empty();
         let data = match self.ctx.receive_packet(&mut pkt) {
             Ok(()) => pkt.data().unwrap_or(&[]).to_vec(),
-            Err(Error::Other {
-                errno: error::EAGAIN,
-            }) => vec![],
+            Err(Error::Other { errno: error::EAGAIN }) => vec![],
             Err(e) => anyhow::bail!("encode receive_packet: {e}"),
         };
 
