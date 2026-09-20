@@ -161,6 +161,7 @@ mod pipewire_capture {
         }
 
         /// Returns approximate number of frames in buffer
+        #[allow(dead_code)]
         fn len(&self) -> usize {
             let head = self.head.load(Ordering::Acquire);
             let tail = self.tail.load(Ordering::Acquire);
