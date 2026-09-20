@@ -93,8 +93,8 @@ impl ScreenCapture {
 
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 mod pipewire_capture {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result};
