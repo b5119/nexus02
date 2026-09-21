@@ -72,32 +72,27 @@ impl FfmpegEncoder {
         enc.set_frame_rate(Some((30, 1)));
 
         // Target ~10 Mbps for 1080p30 with VBV constraints for network stability
-        let target_bps = (scaled_w * scaled_h) as u64 * 8_000_000 / (1920 * 1080);
+let target_bps = (scaled_w * scaled_h) as u64 * 8_000_000 / (1920 * 1080);
         enc.set_bit_rate(target_bps as usize);
 
-        // x264 tune for ULTRA-low latency streaming:
-        // - keyint=8: IDR every ~0.25s for instant recovery
-        // - min-keyint=8 + scenecut=0: strictly periodic IDRs
+        // x264 tune for low-latency streaming (balanced for stability):
+        // - keyint=15: IDR every ~0.5s for fast recovery
+        // - min-keyint=15 + scenecut=0: strictly periodic IDRs
         // - bframes=0: no reordering delay
         // - repeat-headers=1: SPS/PPS with every IDR
-        // - vbv: very tight constraints for network stability
+        // - vbv: moderate constraints for network stability
         // - preset=ultrafast: fastest encoding
         // - tune=zerolatency: optimize for streaming
         // - profile=baseline: maximum decoder compatibility
-        // - no-scenecut: no adaptive IDR
-        // - ref=1: minimum reference frames
-        // - me=dia: fastest motion estimation
-        // - subme=0: simplest subpixel ME
-        // - no-deblock=1: disable deblocking filter for speed
         let mut opts = {
             let mut d = Dictionary::new();
             d.set(
                 "x264-params",
-                "keyint=8:min-keyint=8:scenecut=0:bframes=0:repeat-headers=1:vbv-bufsize=500:vbv-maxrate=8000:ref=1:me=dia:subme=0:no-deblock=1",
+                "keyint=15:min-keyint=15:scenecut=0:bframes=0:repeat-headers=1:vbv-bufsize=1000:vbv-maxrate=8000:ref=1:me=dia:subme=0:no-deblock=1",
             );
             d
         };
-
+        
         // Add encoder options via Dictionary (not x264-params)
         opts.set("preset", "ultrafast");
         opts.set("tune", "zerolatency");

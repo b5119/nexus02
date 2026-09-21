@@ -348,9 +348,8 @@ mod pipewire_capture {
                     Range,
                     Rectangle,
                     pw::spa::utils::Rectangle {
-                        // Force 720p for ultra-low latency
-                        width: 1280,
-                        height: 720
+                        width: w,
+                        height: h
                     },
                     pw::spa::utils::Rectangle {
                         width: 1,

@@ -26,7 +26,7 @@ Goal: stream the host's screen to a paired tablet/phone and forward touch/keyboa
   - Negotiates a real video format (BGRA/BGRx/RGBA/RGBx + size + framerate) and pumps the main loop so the screencast node starts streaming.
   - Verified: diagnostic harness shows ~96% non-black frames with real desktop pixel values.
 - [x] **H.264 encoding** via `libx264` (ffmpeg-next) tuned for real-time:
-  - IDR every ~0.5s (`keyint=15`), no B-frames (`bframes=0`), in-band SPS/PPS (`repeat-headers=1`), explicit ~10 Mbps bitrate, `preset=ultrafast`, `tune=zerolatency`, `profile=baseline`.
+  - IDR every ~0.5s (`keyint=15`), no B-frames (`bframes=0`), in-band SPS/PPS (`repeat-headers=1`), ~8 Mbps bitrate, `preset=ultrafast`, `tune=zerolatency`, `profile=baseline`, `vbv-bufsize=1000`, `vbv-maxrate=8000`, `ref=1`, `me=dia`, `subme=0`, `no-deblock=1`.
 - [x] **Fixed encoder PTS bug**: the scaler (`sws_scale`) does not copy timestamps; every frame reached libx264 with `pts=0`, causing `non-strictly-monotonic PTS` spam and a flickering stream. Now the scaled frame inherits the source PTS and advances by the nominal frame period (~33 ms).
 - [x] **Streaming gRPC** (bidirectional): `VideoFrame` from host, `InputEvent` from viewer.
 - [x] **Android viewer app** (Kotlin, MediaCodec decoder, Material 3 UI):

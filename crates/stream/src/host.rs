@@ -81,20 +81,20 @@ impl StreamService for StreamHostService {
             let mut next_frame_deadline =
                 start + std::time::Duration::from_nanos(frame_interval_ns);
 
-            loop {
+loop {
                 // Wait until it's time for the next frame (drift-free pacing)
                 let now = std::time::Instant::now();
                 if now < next_frame_deadline {
                     tokio::time::sleep_until(tokio::time::Instant::from_std(next_frame_deadline))
                         .await;
                 }
-
+                
                 // Schedule next frame deadline (adds frame_interval_ns, self-correcting)
                 next_frame_deadline += std::time::Duration::from_nanos(frame_interval_ns);
-
-                // If we're behind by more than 1 frame, skip this frame entirely (aggressive drop)
+                
+                // If we're behind by more than 2 frames, skip this frame entirely
                 let now = std::time::Instant::now();
-                if now > next_frame_deadline + std::time::Duration::from_nanos(frame_interval_ns) {
+                if now > next_frame_deadline + std::time::Duration::from_nanos(frame_interval_ns * 2) {
                     // Drop frame to catch up - don't encode, just reschedule
                     next_frame_deadline = now + std::time::Duration::from_nanos(frame_interval_ns);
                     continue;
@@ -129,11 +129,10 @@ impl StreamService for StreamHostService {
                     keyframe: encoded.keyframe,
                 };
 
-                // Non-blocking send with backpressure handling
-                if tx.try_send(Ok(vf)).is_err() {
-                    // Channel full - drop this frame and continue
-                    tracing::warn!("channel full, dropping frame");
-                    continue;
+                // Non-blocking send with short timeout instead of dropping
+                if tx.send(Ok(vf)).await.is_err() {
+                    tracing::warn!("send failed, breaking stream");
+                    break;
                 }
             }
         });
