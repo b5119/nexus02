@@ -39,6 +39,7 @@ impl StreamService for StreamHostService {
         req: Request<tonic::Streaming<InputEvent>>,
     ) -> Result<Response<Self::RemoteControlStream>, Status> {
         let mut input_stream = req.into_inner();
+        // Bounded channel for backpressure handling (capacity 32 frames ~1 second at 30fps)
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         let encoder = self.host.encoder.clone();
@@ -51,8 +52,9 @@ let capture = self.host.capture.clone();
             let frames_encoded = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let frames_sent = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let frames_dropped_blank = Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let frames_dropped_lag = Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let encode_errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
+let frames_dropped_lag = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let frames_dropped_channel_full = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let encode_errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let capture_errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
             // Input injection handler
@@ -79,21 +81,23 @@ let capture = self.host.capture.clone();
             let log_frames_encoded = Arc::clone(&frames_encoded);
             let log_frames_sent = Arc::clone(&frames_sent);
             let log_frames_dropped_blank = Arc::clone(&frames_dropped_blank);
-            let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
-            let log_encode_errors = Arc::clone(&encode_errors);
-            let log_capture_errors = Arc::clone(&capture_errors);
+let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
+        let log_frames_dropped_channel_full = Arc::clone(&frames_dropped_channel_full);
+        let log_encode_errors = Arc::clone(&encode_errors);
+        let log_capture_errors = Arc::clone(&capture_errors);
 
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
                 loop {
                     interval.tick().await;
                     tracing::info!(
-                        "stream metrics: captured={}, encoded={}, sent={}, dropped_blank={}, dropped_lag={}, encode_err={}, capture_err={}",
+                        "stream metrics: captured={}, encoded={}, sent={}, dropped_blank={}, dropped_lag={}, dropped_channel_full={}, encode_err={}, capture_err={}",
                         log_frames_captured.load(Ordering::Relaxed),
                         log_frames_encoded.load(Ordering::Relaxed),
                         log_frames_sent.load(Ordering::Relaxed),
                         log_frames_dropped_blank.load(Ordering::Relaxed),
                         log_frames_dropped_lag.load(Ordering::Relaxed),
+                        log_frames_dropped_channel_full.load(Ordering::Relaxed),
                         log_encode_errors.load(Ordering::Relaxed),
                         log_capture_errors.load(Ordering::Relaxed),
                     );
@@ -170,12 +174,25 @@ let capture = self.host.capture.clone();
                     keyframe: encoded.keyframe,
                 };
 
-                // Non-blocking send with short timeout instead of dropping
-                if tx.send(Ok(vf)).await.is_err() {
-                    tracing::warn!("send failed, breaking stream");
-                    break;
+                // Non-blocking send with timeout and backpressure handling
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    tx.send(Ok(vf))
+                ).await {
+                    Ok(Ok(())) => {
+                        frames_sent.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!("send failed, breaking stream");
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout - channel full, drop frame and count
+                        frames_dropped_channel_full.fetch_add(1, Ordering::Relaxed);
+                        tracing::debug!("channel full, dropping frame");
+                        continue;
+                    }
                 }
-                frames_sent.fetch_add(1, Ordering::Relaxed);
             }
 });
 
