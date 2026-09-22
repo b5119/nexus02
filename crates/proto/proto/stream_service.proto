@@ -19,6 +19,8 @@ message VideoFrame {
   uint32 height = 4;          // Frame height in pixels
   bytes data = 5;             // Encoded H.264 NAL units
   bool keyframe = 6;          // True if this frame is a keyframe (IDR)
+  uint64 capture_latency_us = 7;  // Capture latency in microseconds
+  uint64 encode_latency_us = 8;   // Encode latency in microseconds
 }
 
 enum InputEventType {

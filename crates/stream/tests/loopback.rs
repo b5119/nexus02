@@ -63,6 +63,8 @@ impl StreamService for SyntheticStreamHost {
                             height: encoded.height,
                             data: encoded.data,
                             keyframe: encoded.keyframe,
+                            capture_latency_us: 0,
+                            encode_latency_us: 0,
                         };
                         if tx.send(Ok(vf)).await.is_err() {
                             break;

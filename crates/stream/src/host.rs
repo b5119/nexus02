@@ -48,14 +48,17 @@ let capture = self.host.capture.clone();
 
         tokio::spawn(async move {
             // Metrics counters for observability (shared via Arc for cross-task access)
-            let frames_captured = Arc::new(std::sync::atomic::AtomicU64::new(0));
+let frames_captured = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let frames_encoded = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let frames_sent = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let frames_dropped_blank = Arc::new(std::sync::atomic::AtomicU64::new(0));
-let frames_dropped_lag = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let frames_dropped_channel_full = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let encode_errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let frames_dropped_lag = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let frames_dropped_channel_full = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let encode_errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let capture_errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            // Latency sum counters for average calculation
+            let total_capture_latency_us = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let total_encode_latency_us = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
             // Input injection handler
             let injector_clone = injector.clone();
@@ -85,13 +88,15 @@ let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
         let log_frames_dropped_channel_full = Arc::clone(&frames_dropped_channel_full);
         let log_encode_errors = Arc::clone(&encode_errors);
         let log_capture_errors = Arc::clone(&capture_errors);
+        let log_total_capture_latency_us = Arc::clone(&total_capture_latency_us);
+        let log_total_encode_latency_us = Arc::clone(&total_encode_latency_us);
 
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
                 loop {
                     interval.tick().await;
                     tracing::info!(
-                        "stream metrics: captured={}, encoded={}, sent={}, dropped_blank={}, dropped_lag={}, dropped_channel_full={}, encode_err={}, capture_err={}",
+                        "stream metrics: captured={}, encoded={}, sent={}, dropped_blank={}, dropped_lag={}, dropped_channel_full={}, encode_err={}, capture_err={}, avg_capture_latency_us={}, avg_encode_latency_us={}",
                         log_frames_captured.load(Ordering::Relaxed),
                         log_frames_encoded.load(Ordering::Relaxed),
                         log_frames_sent.load(Ordering::Relaxed),
@@ -100,6 +105,12 @@ let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
                         log_frames_dropped_channel_full.load(Ordering::Relaxed),
                         log_encode_errors.load(Ordering::Relaxed),
                         log_capture_errors.load(Ordering::Relaxed),
+                        if log_frames_captured.load(Ordering::Relaxed) > 0 {
+                            log_total_capture_latency_us.load(Ordering::Relaxed) / log_frames_captured.load(Ordering::Relaxed)
+                        } else { 0 },
+                        if log_frames_encoded.load(Ordering::Relaxed) > 0 {
+                            log_total_encode_latency_us.load(Ordering::Relaxed) / log_frames_encoded.load(Ordering::Relaxed)
+                        } else { 0 },
                     );
                 }
             });
@@ -141,6 +152,7 @@ let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
                     continue;
                 }
 
+                let capture_start = std::time::Instant::now();
                 let frame = match capture.capture_frame() {
                     Ok(f) => f,
                     Err(e) => {
@@ -149,8 +161,11 @@ let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
                         continue;
                     }
                 };
+                let capture_latency_us = capture_start.elapsed().as_micros() as u64;
                 frames_captured.fetch_add(1, Ordering::Relaxed);
+                total_capture_latency_us.fetch_add(capture_latency_us, Ordering::Relaxed);
 
+                let encode_start = std::time::Instant::now();
                 let encoded = match encoder.encode(frame) {
                     Ok(e) => e,
                     Err(e) => {
@@ -159,7 +174,9 @@ let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
                         continue;
                     }
                 };
+                let encode_latency_us = encode_start.elapsed().as_micros() as u64;
                 frames_encoded.fetch_add(1, Ordering::Relaxed);
+                total_encode_latency_us.fetch_add(encode_latency_us, Ordering::Relaxed);
 
                 seq += 1;
 
@@ -172,6 +189,8 @@ let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
                     height: encoded.height,
                     data: encoded.data,
                     keyframe: encoded.keyframe,
+                    capture_latency_us,
+                    encode_latency_us,
                 };
 
                 // Non-blocking send with timeout and backpressure handling
