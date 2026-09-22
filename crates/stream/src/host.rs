@@ -43,12 +43,12 @@ impl StreamService for StreamHostService {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         let encoder = self.host.encoder.clone();
-let capture = self.host.capture.clone();
+        let capture = self.host.capture.clone();
         let injector = self.host.injector.clone();
 
         tokio::spawn(async move {
             // Metrics counters for observability (shared via Arc for cross-task access)
-let frames_captured = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let frames_captured = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let frames_encoded = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let frames_sent = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let frames_dropped_blank = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -84,12 +84,12 @@ let frames_captured = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let log_frames_encoded = Arc::clone(&frames_encoded);
             let log_frames_sent = Arc::clone(&frames_sent);
             let log_frames_dropped_blank = Arc::clone(&frames_dropped_blank);
-let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
-        let log_frames_dropped_channel_full = Arc::clone(&frames_dropped_channel_full);
-        let log_encode_errors = Arc::clone(&encode_errors);
-        let log_capture_errors = Arc::clone(&capture_errors);
-        let log_total_capture_latency_us = Arc::clone(&total_capture_latency_us);
-        let log_total_encode_latency_us = Arc::clone(&total_encode_latency_us);
+            let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
+            let log_frames_dropped_channel_full = Arc::clone(&frames_dropped_channel_full);
+            let log_encode_errors = Arc::clone(&encode_errors);
+            let log_capture_errors = Arc::clone(&capture_errors);
+            let log_total_capture_latency_us = Arc::clone(&total_capture_latency_us);
+            let log_total_encode_latency_us = Arc::clone(&total_encode_latency_us);
 
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -139,13 +139,15 @@ let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
                     tokio::time::sleep_until(tokio::time::Instant::from_std(next_frame_deadline))
                         .await;
                 }
-                
+
                 // Schedule next frame deadline (adds frame_interval_ns, self-correcting)
                 next_frame_deadline += std::time::Duration::from_nanos(frame_interval_ns);
-                
+
                 // If we're behind by more than 2 frames, skip this frame entirely
                 let now = std::time::Instant::now();
-                if now > next_frame_deadline + std::time::Duration::from_nanos(frame_interval_ns * 2) {
+                if now
+                    > next_frame_deadline + std::time::Duration::from_nanos(frame_interval_ns * 2)
+                {
                     // Drop frame to catch up - don't encode, just reschedule
                     frames_dropped_lag.fetch_add(1, Ordering::Relaxed);
                     next_frame_deadline = now + std::time::Duration::from_nanos(frame_interval_ns);
@@ -194,10 +196,9 @@ let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
                 };
 
                 // Non-blocking send with timeout and backpressure handling
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(50),
-                    tx.send(Ok(vf))
-                ).await {
+                match tokio::time::timeout(std::time::Duration::from_millis(50), tx.send(Ok(vf)))
+                    .await
+                {
                     Ok(Ok(())) => {
                         frames_sent.fetch_add(1, Ordering::Relaxed);
                     }
@@ -213,7 +214,7 @@ let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
                     }
                 }
             }
-});
+        });
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,

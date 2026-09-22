@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rand::rngs::OsRng;
@@ -37,10 +37,10 @@ impl PairingRateLimiter {
     pub fn check(&self, ip: &str) -> (bool, Option<Duration>) {
         let now = Instant::now();
         let mut attempts = self.attempts.lock().unwrap();
-        
+
         // Clean up old entries
         attempts.retain(|_, (_, timestamp)| now.duration_since(*timestamp) < self.window);
-        
+
         if let Some((count, first_attempt)) = attempts.get_mut(&ip.to_string()) {
             if now.duration_since(*first_attempt) >= self.window {
                 // Window expired, reset
@@ -48,12 +48,12 @@ impl PairingRateLimiter {
                 *first_attempt = now;
                 return (true, None);
             }
-            
+
             if *count >= self.max_attempts {
                 let retry_after = self.window - now.duration_since(*first_attempt);
                 return (false, Some(retry_after));
             }
-            
+
             *count += 1;
             (true, None)
         } else {
@@ -298,7 +298,8 @@ impl nexus_proto::pair::v1::pair_service_server::PairService for PairingServer {
         req: Request<nexus_proto::pair::v1::PairRequest>,
     ) -> Result<Response<nexus_proto::pair::v1::PairResponse>, Status> {
         // Extract client IP for rate limiting
-        let client_ip = req.remote_addr()
+        let client_ip = req
+            .remote_addr()
             .map(|addr| addr.ip().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 

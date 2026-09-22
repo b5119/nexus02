@@ -72,7 +72,7 @@ impl FfmpegEncoder {
         enc.set_frame_rate(Some((30, 1)));
 
         // Target ~10 Mbps for 1080p30 with VBV constraints for network stability
-let target_bps = (scaled_w * scaled_h) as u64 * 8_000_000 / (1920 * 1080);
+        let target_bps = (scaled_w * scaled_h) as u64 * 8_000_000 / (1920 * 1080);
         enc.set_bit_rate(target_bps as usize);
 
         // x264 tune for low-latency streaming (balanced for stability):
@@ -92,7 +92,7 @@ let target_bps = (scaled_w * scaled_h) as u64 * 8_000_000 / (1920 * 1080);
             );
             d
         };
-        
+
         // Add encoder options via Dictionary (not x264-params)
         // Only apply these for libx264; QSV doesn't support these options
         if codec_name == "libx264" {

@@ -211,7 +211,9 @@ mod pipewire_capture {
         pub fn new(fps: f64, ring_buffer_capacity: usize) -> Result<Self> {
             // Lock-free ring buffer for frame passing (producer=PipeWire thread, consumer=encode thread)
             // Capacity configurable to tune latency vs. throughput trade-off
-            let frame_ring = Arc::new(std::sync::Mutex::new(FrameRingBuffer::new(ring_buffer_capacity)));
+            let frame_ring = Arc::new(std::sync::Mutex::new(FrameRingBuffer::new(
+                ring_buffer_capacity,
+            )));
 
             // --- ashpd: create screencast session ---
             // Spawn a dedicated OS thread to avoid "Cannot start a runtime
