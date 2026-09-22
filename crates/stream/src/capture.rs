@@ -31,7 +31,7 @@ impl ScreenCapture {
 
         #[cfg(feature = "ffmpeg")]
         if is_wayland {
-            match PipeWireCapture::new(fps) {
+            match PipeWireCapture::new(fps, 8) {
                 Ok(cap) => {
                     tracing::info!("capture backend: pipewire");
                     return Ok(Self::PipeWire(cap));
@@ -208,10 +208,10 @@ mod pipewire_capture {
         _main_loop: MainLoopBox,
     }
     impl PipeWireCapture {
-        pub fn new(fps: f64) -> Result<Self> {
+        pub fn new(fps: f64, ring_buffer_capacity: usize) -> Result<Self> {
             // Lock-free ring buffer for frame passing (producer=PipeWire thread, consumer=encode thread)
-            // Capacity of 8 frames: enough to absorb jitter without excessive memory
-            let frame_ring = Arc::new(std::sync::Mutex::new(FrameRingBuffer::new(8)));
+            // Capacity configurable to tune latency vs. throughput trade-off
+            let frame_ring = Arc::new(std::sync::Mutex::new(FrameRingBuffer::new(ring_buffer_capacity)));
 
             // --- ashpd: create screencast session ---
             // Spawn a dedicated OS thread to avoid "Cannot start a runtime
