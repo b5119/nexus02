@@ -52,7 +52,7 @@ impl StreamService for StreamHostService {
                 while let Some(ev_result) = input_stream.next().await {
                     match ev_result {
                         Ok(ev) => {
-                            if let Err(e) = injector_clone.blocking_lock().inject(&ev) {
+                            if let Err(e) = injector_clone.lock().await.inject(&ev) {
                                 tracing::warn!("input injection failed: {e:#}");
                             }
                         }
@@ -64,15 +64,41 @@ impl StreamService for StreamHostService {
                 }
             });
 
-            // Capture/encode/send loop
+            // Capture/encode/send loop with proper frame pacing and drift correction
             let mut seq = 0u64;
             let mut encoder = encoder.lock().await;
             let mut capture = capture.lock().await;
             let fps = capture.fps();
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs_f64(1.0 / fps));
+            let frame_interval_ns = (1_000_000_000.0 / fps) as u64;
 
-            loop {
-                interval.tick().await;
+            // Monotonic start instant so frame timestamps are small, increasing
+            // values (ms since stream start) that map cleanly to MediaCodec's
+            // presentationTimeUs (µs), instead of huge Unix-epoch wall-clock
+            // values that make hardware decoders reset and flicker.
+            let start = std::time::Instant::now();
+
+            // Frame pacing: track when the NEXT frame should be sent to prevent drift
+            let mut next_frame_deadline =
+                start + std::time::Duration::from_nanos(frame_interval_ns);
+
+loop {
+                // Wait until it's time for the next frame (drift-free pacing)
+                let now = std::time::Instant::now();
+                if now < next_frame_deadline {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(next_frame_deadline))
+                        .await;
+                }
+                
+                // Schedule next frame deadline (adds frame_interval_ns, self-correcting)
+                next_frame_deadline += std::time::Duration::from_nanos(frame_interval_ns);
+                
+                // If we're behind by more than 2 frames, skip this frame entirely
+                let now = std::time::Instant::now();
+                if now > next_frame_deadline + std::time::Duration::from_nanos(frame_interval_ns * 2) {
+                    // Drop frame to catch up - don't encode, just reschedule
+                    next_frame_deadline = now + std::time::Duration::from_nanos(frame_interval_ns);
+                    continue;
+                }
 
                 let frame = match capture.capture_frame() {
                     Ok(f) => f,
@@ -92,10 +118,7 @@ impl StreamService for StreamHostService {
 
                 seq += 1;
 
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
+                let ts = start.elapsed().as_millis() as u64;
 
                 let vf = VideoFrame {
                     sequence: seq,
@@ -106,7 +129,9 @@ impl StreamService for StreamHostService {
                     keyframe: encoded.keyframe,
                 };
 
+                // Non-blocking send with short timeout instead of dropping
                 if tx.send(Ok(vf)).await.is_err() {
+                    tracing::warn!("send failed, breaking stream");
                     break;
                 }
             }

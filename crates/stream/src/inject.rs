@@ -26,8 +26,6 @@ mod sys {
     use std::os::raw::{c_int, c_uint, c_ushort};
 
     pub const UI_DEV_CREATE: c_uint = 0x5501u32;
-    #[allow(dead_code)]
-    pub const UI_DEV_DESTROY: c_uint = 0x5502u32;
     pub const UI_SET_EVBIT: c_uint = 0x40045564u32;
     pub const UI_SET_KEYBIT: c_uint = 0x40045565u32;
     pub const UI_SET_RELBIT: c_uint = 0x40045566u32;
@@ -41,6 +39,7 @@ mod sys {
 
     pub const REL_X: c_ushort = 0x00;
     pub const REL_Y: c_ushort = 0x01;
+    pub const REL_WHEEL: c_ushort = 0x08;
     pub const ABS_X: c_ushort = 0x00;
     pub const ABS_Y: c_ushort = 0x01;
 
@@ -102,6 +101,7 @@ impl Injector {
 
                 ioctl_set(raw_fd, sys::UI_SET_RELBIT, sys::REL_X as i32)?;
                 ioctl_set(raw_fd, sys::UI_SET_RELBIT, sys::REL_Y as i32)?;
+                ioctl_set(raw_fd, sys::UI_SET_RELBIT, sys::REL_WHEEL as i32)?;
 
                 ioctl_set(raw_fd, sys::UI_SET_ABSBIT, sys::ABS_X as i32)?;
                 ioctl_set(raw_fd, sys::UI_SET_ABSBIT, sys::ABS_Y as i32)?;
@@ -209,6 +209,10 @@ impl Injector {
                         _ => return Ok(()),
                     };
                     self.write_ev(sys::EV_KEY, btn, 0)?;
+                    self.sync()?;
+                }
+                a if a == InputAction::Scroll as i32 => {
+                    self.write_ev(sys::EV_REL, sys::REL_WHEEL, event.scroll_delta)?;
                     self.sync()?;
                 }
                 _ => {}
@@ -321,6 +325,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 button: 0,
+                scroll_delta: 0,
             };
             assert!(
                 injector.inject(&event).is_ok(),

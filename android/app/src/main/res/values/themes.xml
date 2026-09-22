@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Nexus" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/nexus_primary</item>
+        <item name="colorOnPrimary">@color/nexus_on_primary</item>
+        <item name="colorPrimaryContainer">@color/nexus_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/nexus_on_primary_container</item>
+        <item name="colorSecondary">@color/nexus_secondary</item>
+        <item name="colorOnSecondary">@color/nexus_on_secondary</item>
+        <item name="colorSurface">@color/nexus_surface</item>
+        <item name="colorOnSurface">@color/nexus_on_surface</item>
+        <item name="colorSurfaceVariant">@color/nexus_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/nexus_on_surface_variant</item>
+        <item name="colorOutline">@color/nexus_outline</item>
+        <item name="android:statusBarColor">@color/nexus_background</item>
+        <item name="android:navigationBarColor">@color/nexus_background</item>
+    </style>
+</resources>

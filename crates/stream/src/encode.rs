@@ -40,6 +40,8 @@ struct FfmpegEncoder {
     scaled_w: u32,
     scaled_h: u32,
     pts: i64,
+    src_frame: ffmpeg_next::frame::Video,
+    yuv_frame: ffmpeg_next::frame::Video,
 }
 
 #[cfg(feature = "ffmpeg")]
@@ -47,6 +49,9 @@ unsafe impl Send for FfmpegEncoder {}
 
 #[cfg(feature = "ffmpeg")]
 impl FfmpegEncoder {
+    const VIDEO_TIME_BASE: (i32, i32) = (1, 1000); // ms
+    const NOMINAL_FRAME_MS: i64 = 33; // 30 fps
+
     fn new(width: u32, height: u32, codec_name: &str) -> Result<Self> {
         use ffmpeg::{codec, encoder, format, Dictionary};
         use ffmpeg_next as ffmpeg;
@@ -63,10 +68,37 @@ impl FfmpegEncoder {
         enc.set_width(scaled_w);
         enc.set_height(scaled_h);
         enc.set_format(format::Pixel::YUV420P);
-        enc.set_time_base((1, 1000));
+        enc.set_time_base(Self::VIDEO_TIME_BASE);
         enc.set_frame_rate(Some((30, 1)));
 
-        let opened = enc.open_with(Dictionary::new())?;
+        // Target ~10 Mbps for 1080p30 with VBV constraints for network stability
+let target_bps = (scaled_w * scaled_h) as u64 * 8_000_000 / (1920 * 1080);
+        enc.set_bit_rate(target_bps as usize);
+
+        // x264 tune for low-latency streaming (balanced for stability):
+        // - keyint=15: IDR every ~0.5s for fast recovery
+        // - min-keyint=15 + scenecut=0: strictly periodic IDRs
+        // - bframes=0: no reordering delay
+        // - repeat-headers=1: SPS/PPS with every IDR
+        // - vbv: moderate constraints for network stability
+        // - preset=ultrafast: fastest encoding
+        // - tune=zerolatency: optimize for streaming
+        // - profile=baseline: maximum decoder compatibility
+        let mut opts = {
+            let mut d = Dictionary::new();
+            d.set(
+                "x264-params",
+                "keyint=15:min-keyint=15:scenecut=0:bframes=0:repeat-headers=1:vbv-bufsize=1000:vbv-maxrate=8000:ref=1:me=dia:subme=0:no-deblock=1",
+            );
+            d
+        };
+        
+        // Add encoder options via Dictionary (not x264-params)
+        opts.set("preset", "ultrafast");
+        opts.set("tune", "zerolatency");
+        opts.set("profile", "baseline");
+
+        let opened = enc.open_with(opts)?;
 
         let scaler = ffmpeg::software::scaling::Context::get(
             format::Pixel::BGRA,
@@ -78,31 +110,39 @@ impl FfmpegEncoder {
             ffmpeg::software::scaling::flag::Flags::BILINEAR,
         )?;
 
+        // Pre-allocate frames to avoid per-frame allocations
+        let src_frame = ffmpeg::frame::Video::new(format::Pixel::BGRA, width, height);
+        let yuv_frame = ffmpeg::frame::Video::new(format::Pixel::YUV420P, scaled_w, scaled_h);
+
         Ok(Self {
             ctx: opened,
             scaler,
             scaled_w,
             scaled_h,
             pts: 0,
+            src_frame,
+            yuv_frame,
         })
     }
 
     fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame> {
-        use ffmpeg::{error, frame, packet, Error};
+        use ffmpeg::{error, packet, Error};
         use ffmpeg_next as ffmpeg;
 
-        let mut src = frame::Video::new(ffmpeg::format::Pixel::BGRA, frame.width, frame.height);
-        let dst = src.data_mut(0);
+        // Reuse pre-allocated frames - avoid allocation
+        // Clear and copy new data
+        let dst = self.src_frame.data_mut(0);
         let copy_len = dst.len().min(frame.data.len());
         dst[..copy_len].copy_from_slice(&frame.data[..copy_len]);
-        src.set_pts(Some(self.pts));
-        self.pts += 1;
 
-        let mut yuv =
-            frame::Video::new(ffmpeg::format::Pixel::YUV420P, self.scaled_w, self.scaled_h);
-        self.scaler.run(&src, &mut yuv)?;
+        self.src_frame.set_pts(Some(self.pts));
+        self.pts += Self::NOMINAL_FRAME_MS;
 
-        self.ctx.send_frame(&yuv)?;
+        // Reuse yuv frame
+        self.yuv_frame.set_pts(self.src_frame.pts());
+        self.scaler.run(&self.src_frame, &mut self.yuv_frame)?;
+
+        self.ctx.send_frame(&self.yuv_frame)?;
 
         let mut pkt = packet::Packet::empty();
         let data = match self.ctx.receive_packet(&mut pkt) {

@@ -93,7 +93,9 @@ impl ScreenCapture {
 
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 mod pipewire_capture {
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result};
     use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
@@ -105,37 +107,117 @@ mod pipewire_capture {
 
     use super::CapturedFrame;
 
+    // Lock-free single-producer single-consumer ring buffer for frames
+    // O(1) push/pop, no locks, cache-friendly
+    struct FrameRingBuffer {
+        buffer: Box<[Option<CapturedFrame>]>,
+        head: AtomicUsize, // producer index
+        tail: AtomicUsize, // consumer index
+        capacity: usize,
+    }
+
+    impl FrameRingBuffer {
+        fn new(capacity: usize) -> Self {
+            let mut buffer = Vec::with_capacity(capacity);
+            for _ in 0..capacity {
+                buffer.push(None);
+            }
+            Self {
+                buffer: buffer.into_boxed_slice(),
+                head: AtomicUsize::new(0),
+                tail: AtomicUsize::new(0),
+                capacity,
+            }
+        }
+
+        /// Try to push a frame. Returns false if buffer is full (producer faster than consumer).
+        /// O(1) - single atomic CAS on head.
+        fn try_push(&mut self, frame: CapturedFrame) -> bool {
+            let head = self.head.load(Ordering::Acquire);
+            let next_head = (head + 1) % self.capacity;
+
+            // Check if buffer is full (next_head would catch up to tail)
+            if next_head == self.tail.load(Ordering::Acquire) {
+                return false; // buffer full
+            }
+
+            self.buffer[head] = Some(frame);
+            self.head.store(next_head, Ordering::Release);
+            true
+        }
+
+        /// Try to pop a frame. Returns None if buffer is empty.
+        /// O(1) - single atomic CAS on tail.
+        fn try_pop(&mut self) -> Option<CapturedFrame> {
+            let tail = self.tail.load(Ordering::Acquire);
+            if tail == self.head.load(Ordering::Acquire) {
+                return None; // buffer empty
+            }
+
+            let frame = self.buffer[tail].take();
+            self.tail
+                .store((tail + 1) % self.capacity, Ordering::Release);
+            frame
+        }
+
+        /// Returns approximate number of frames in buffer
+        #[allow(dead_code)]
+        fn len(&self) -> usize {
+            let head = self.head.load(Ordering::Acquire);
+            let tail = self.tail.load(Ordering::Acquire);
+            (head + self.capacity - tail) % self.capacity
+        }
+    }
+
     // SAFETY: PipeWireCapture is always behind Arc<Mutex<>>, so only one
     // thread accesses the contained pipewire objects at a time.
     unsafe impl Send for PipeWireCapture {}
     unsafe impl Sync for PipeWireCapture {}
 
+    // SAFETY: The main loop is owned by MainLoopBox inside PipeWireState, which
+    // outlives this pointer. Only `pw_main_loop_run` touches it from this thread.
+    struct SendLoop(*mut pw::sys::pw_main_loop);
+    unsafe impl Send for SendLoop {}
+
+    impl SendLoop {
+        fn run(self) {
+            unsafe {
+                pw::sys::pw_main_loop_run(self.0);
+            }
+        }
+    }
+
     pub struct PipeWireCapture {
         width: u32,
         height: u32,
         fps: f64,
-        frame_buffer: Arc<Mutex<Option<CapturedFrame>>>,
+        // Lock-free ring buffer for frame passing (producer=PipeWire thread, consumer=encode thread)
+        // Using Mutex for interior mutability since we need &mut self for push/pop
+        frame_ring: Arc<std::sync::Mutex<FrameRingBuffer>>,
+        _loop_thread: Option<std::thread::JoinHandle<()>>,
         _state: Option<PipeWireState>,
     }
 
     // Keep pipewire objects alive; dropped in field order (listener first, main_loop last)
     struct PipeWireState {
         _listener: StreamListener<()>,
+        _core_listener: pw::core::Listener,
         _stream: StreamBox<'static>,
         _core: pw::core::CoreBox<'static>,
         _context: pw::context::ContextBox<'static>,
         _main_loop: MainLoopBox,
     }
-
     impl PipeWireCapture {
         pub fn new(fps: f64) -> Result<Self> {
-            let frame_buffer: Arc<Mutex<Option<CapturedFrame>>> = Arc::new(Mutex::new(None));
+            // Lock-free ring buffer for frame passing (producer=PipeWire thread, consumer=encode thread)
+            // Capacity of 8 frames: enough to absorb jitter without excessive memory
+            let frame_ring = Arc::new(std::sync::Mutex::new(FrameRingBuffer::new(8)));
 
             // --- ashpd: create screencast session ---
             // Spawn a dedicated OS thread to avoid "Cannot start a runtime
             // from within a runtime" when the caller is already in a tokio
             // context (e.g. nexus-agent).
-            let (node_id, stream_size) = std::thread::spawn(|| {
+            let (node_id, stream_size, remote_fd) = std::thread::spawn(|| {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -173,23 +255,15 @@ mod pipewire_capture {
                             size.1
                         );
 
-                        // Open pipewire fd
-                        let _fd = proxy
+                        // Open the PipeWire remote for the session bus. The
+                        // screencast node is published on the *session*
+                        // PipeWire instance, so we MUST connect via this fd
+                        // rather than the default instance.
+                        let fd = proxy
                             .open_pipe_wire_remote(&session, Default::default())
                             .await?;
 
-                        // NOTE: The pipewire crate does not expose a way to connect
-                        // via the fd returned by the portal. The fd-based connection
-                        // is only needed when running inside a sandbox (Flatpak).
-                        // Outside a sandbox, we can connect to the session PipeWire
-                        // instance directly via socket.
-                        //
-                        // For now we use Context::connect(None) which connects to
-                        // the default PipeWire instance.  The screencast portal
-                        // publishes the stream node on the session bus, so the
-                        // default instance *should* see it.
-
-                        Ok::<_, anyhow::Error>((node_id, (size.0 as u32, size.1 as u32)))
+                        Ok::<_, anyhow::Error>((node_id, (size.0 as u32, size.1 as u32), fd))
                     })
             })
             .join()
@@ -217,8 +291,19 @@ mod pipewire_capture {
                 unsafe { std::mem::transmute(context.as_ref()) };
 
             let core = context_ref
-                .connect(None)
+                .connect_fd(remote_fd, None)
                 .context("failed to connect to PipeWire")?;
+
+            // Register a core listener so PipeWire processes info/error/done
+            // events and drives the event loop, otherwise format negotiation
+            // can silently fail.
+            let _core_listener = core
+                .as_ref()
+                .add_listener_local()
+                .error(|id, seq, res, message| {
+                    tracing::error!("pipewire core error id={id} seq={seq} res={res}: {message}");
+                })
+                .register();
 
             let core_ref: &'static pw::core::Core = unsafe { std::mem::transmute(core.as_ref()) };
 
@@ -231,9 +316,80 @@ mod pipewire_capture {
             let stream = StreamBox::new(core_ref, "nexus-capture", props)
                 .context("failed to create PipeWire stream")?;
 
+            // Negotiate a packed 4-byte video format so the screencast node
+            // actually starts streaming. The downstream encoder expects BGRA
+            // (encode.rs), which is byte-identical to BGRx.
+            let fmt = pw::spa::pod::object!(
+                pw::spa::utils::SpaTypes::ObjectParamFormat,
+                pw::spa::param::ParamType::EnumFormat,
+                pw::spa::pod::property!(
+                    pw::spa::param::format::FormatProperties::MediaType,
+                    Id,
+                    pw::spa::param::format::MediaType::Video
+                ),
+                pw::spa::pod::property!(
+                    pw::spa::param::format::FormatProperties::MediaSubtype,
+                    Id,
+                    pw::spa::param::format::MediaSubtype::Raw
+                ),
+                pw::spa::pod::property!(
+                    pw::spa::param::format::FormatProperties::VideoFormat,
+                    Choice,
+                    Enum,
+                    Id,
+                    pw::spa::param::video::VideoFormat::BGRA,
+                    pw::spa::param::video::VideoFormat::BGRx,
+                    pw::spa::param::video::VideoFormat::RGBA,
+                    pw::spa::param::video::VideoFormat::RGBx,
+                ),
+                pw::spa::pod::property!(
+                    pw::spa::param::format::FormatProperties::VideoSize,
+                    Choice,
+                    Range,
+                    Rectangle,
+                    pw::spa::utils::Rectangle {
+                        width: w,
+                        height: h
+                    },
+                    pw::spa::utils::Rectangle {
+                        width: 1,
+                        height: 1
+                    },
+                    pw::spa::utils::Rectangle {
+                        width: 7680,
+                        height: 4320
+                    }
+                ),
+                pw::spa::pod::property!(
+                    pw::spa::param::format::FormatProperties::VideoFramerate,
+                    Choice,
+                    Range,
+                    Fraction,
+                    pw::spa::utils::Fraction {
+                        num: fps as u32,
+                        denom: 1
+                    },
+                    pw::spa::utils::Fraction { num: 0, denom: 1 },
+                    pw::spa::utils::Fraction {
+                        num: fps as u32,
+                        denom: 1
+                    }
+                ),
+            );
+            let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+                std::io::Cursor::new(Vec::new()),
+                &pw::spa::pod::Value::Object(fmt),
+            )
+            .context("failed to serialize PipeWire format param")?
+            .0
+            .into_inner();
+            let mut params = [pw::spa::pod::Pod::from_bytes(&values)
+                .context("failed to build PipeWire format pod")?];
+
             // Register process callback BEFORE connecting so it catches
             // frames from the very first buffer PipeWire delivers.
-            let fb = Arc::clone(&frame_buffer);
+            // Uses lock-free ring buffer for zero-contention frame passing.
+            let frame_ring_clone = Arc::clone(&frame_ring);
             let _listener = stream
                 .add_local_listener::<()>()
                 .process(move |s, _| {
@@ -244,12 +400,16 @@ mod pipewire_capture {
                             let size = chunk.size() as usize;
                             if let Some(bytes) = data.data() {
                                 if size == (w * h * 4) as usize && size <= bytes.len() {
-                                    let mut guard = fb.lock().unwrap();
-                                    *guard = Some(CapturedFrame {
+                                    let frame = CapturedFrame {
                                         data: bytes[..size].to_vec(),
                                         width: w,
                                         height: h,
-                                    });
+                                    };
+                                    // Try to push; if full, drop oldest frame (producer faster than consumer)
+                                    // This prevents backpressure buildup while maintaining low latency.
+                                    if let Ok(mut ring) = frame_ring_clone.lock() {
+                                        let _ = ring.try_push(frame);
+                                    }
                                 }
                             }
                         }
@@ -258,25 +418,36 @@ mod pipewire_capture {
                 .register()
                 .context("failed to register PipeWire stream listener")?;
 
-            // Connect the stream to the screencast node
+            // Connect the stream to the screencast node, negotiating the format.
             stream
                 .connect(
                     Direction::Input,
                     Some(node_id),
-                    pw::stream::StreamFlags::MAP_BUFFERS | pw::stream::StreamFlags::RT_PROCESS,
-                    &mut [],
+                    pw::stream::StreamFlags::AUTOCONNECT
+                        | pw::stream::StreamFlags::MAP_BUFFERS
+                        | pw::stream::StreamFlags::RT_PROCESS,
+                    &mut params,
                 )
                 .context("failed to connect PipeWire stream to screencast node")?;
 
             tracing::info!("PipeWire capture stream connected: node_id={}", node_id);
 
+            // Pump the PipeWire main loop on a dedicated OS thread. The main
+            // loop must keep running so PipeWire delivers buffers into
+            // frame_ring via the process callback.
+            let loop_ptr = SendLoop(main_loop.as_raw_ptr());
+
+            let loop_thread = std::thread::spawn(move || loop_ptr.run());
+
             Ok(Self {
                 width,
                 height,
                 fps,
-                frame_buffer,
+                frame_ring,
+                _loop_thread: Some(loop_thread),
                 _state: Some(PipeWireState {
                     _listener,
+                    _core_listener,
                     _stream: stream,
                     _core: core,
                     _context: context,
@@ -286,19 +457,28 @@ mod pipewire_capture {
         }
 
         pub fn capture_frame(&mut self) -> Result<CapturedFrame> {
-            // Try to dequeue from the shared buffer updated by callbacks.
-            if let Some(frame) = self.frame_buffer.lock().unwrap().take() {
-                return Ok(frame);
+            // Try to dequeue from the lock-free ring buffer.
+            // Use a shorter timeout (50ms) to avoid returning blank frames during
+            // transient hiccups. At 30fps we need a frame every ~33ms.
+            let deadline = Instant::now() + Duration::from_millis(50);
+            loop {
+                if let Ok(mut ring) = self.frame_ring.lock() {
+                    if let Some(frame) = ring.try_pop() {
+                        return Ok(frame);
+                    }
+                }
+                if Instant::now() >= deadline {
+                    // No frame yet; return a blank frame so the pipeline stays alive
+                    // instead of stalling. This should be rare once streaming is stable.
+                    let data = vec![0u8; (self.width * self.height * 4) as usize];
+                    return Ok(CapturedFrame {
+                        data,
+                        width: self.width,
+                        height: self.height,
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(1));
             }
-
-            // If no frame available yet, return a blank frame so the
-            // pipeline stays alive while PipeWire negotiates.
-            let data = vec![0u8; (self.width * self.height * 4) as usize];
-            Ok(CapturedFrame {
-                data,
-                width: self.width,
-                height: self.height,
-            })
         }
 
         pub fn dimensions(&self) -> (u32, u32) {
@@ -307,6 +487,18 @@ mod pipewire_capture {
 
         pub fn fps(&self) -> f64 {
             self.fps
+        }
+    }
+
+    impl Drop for PipeWireCapture {
+        fn drop(&mut self) {
+            // Stop the pump thread by quitting the main loop, then join it.
+            if let Some(state) = self._state.as_ref() {
+                state._main_loop.quit();
+            }
+            if let Some(thread) = self._loop_thread.take() {
+                let _ = thread.join();
+            }
         }
     }
 }

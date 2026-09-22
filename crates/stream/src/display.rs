@@ -114,6 +114,7 @@ impl ViewerDisplay {
                                 y: 0,
                                 button: MouseButton::None as i32,
                                 action,
+                                scroll_delta: 0,
                             };
                             self.input_tx.send(ev).ok();
                         }
@@ -125,6 +126,7 @@ impl ViewerDisplay {
                                 y: position.y as u32,
                                 button: MouseButton::None as i32,
                                 action: InputAction::Move as i32,
+                                scroll_delta: 0,
                             };
                             self.input_tx.send(ev).ok();
                         }
@@ -146,6 +148,7 @@ impl ViewerDisplay {
                                 y: 0,
                                 button: btn,
                                 action,
+                                scroll_delta: 0,
                             };
                             self.input_tx.send(ev).ok();
                         }

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="nexus_primary">#BCC4FF</color>
+    <color name="nexus_on_primary">#0A2560</color>
+    <color name="nexus_primary_container">#183EA0</color>
+    <color name="nexus_on_primary_container">#DCE1FF</color>
+    <color name="nexus_secondary">#C3C6DC</color>
+    <color name="nexus_on_secondary">#2C3142</color>
+    <color name="nexus_surface">#121318</color>
+    <color name="nexus_on_surface">#E3E1E9</color>
+    <color name="nexus_surface_variant">#44474F</color>
+    <color name="nexus_on_surface_variant">#C4C6D0</color>
+    <color name="nexus_outline">#8E9099</color>
+    <color name="nexus_background">#121318</color>
+    <color name="nexus_on_background">#E3E1E9</color>
+</resources>

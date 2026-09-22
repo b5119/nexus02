@@ -28,6 +28,7 @@ message PairResponse {
   string host_cert_pem = 2;              // PEM of host's identity cert
   string host_device_id = 3;             // UUID of the host device
   string error_message = 4;              // populated when accepted == false
+  string auth_token = 5;                 // host's shared-secret token (data plane, port 50051)
 }
 
 message ListPeersRequest {}

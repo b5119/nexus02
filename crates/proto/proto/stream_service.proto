@@ -41,6 +41,7 @@ enum InputAction {
   PRESS = 1;
   RELEASE = 2;
   MOVE = 3;
+  SCROLL = 4;   // Scroll wheel; delta in `scroll_delta` (mouse only)
 }
 
 message InputEvent {
@@ -50,4 +51,5 @@ message InputEvent {
   uint32 y = 4;                // Y coordinate (mouse/touch)
   MouseButton button = 5;
   InputAction action = 6;
+  int32 scroll_delta = 7;      // Wheel delta (when action == SCROLL); positive = up
 }
