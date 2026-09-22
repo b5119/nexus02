@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
 
 use anyhow::{Context, Result};
 use rand::rngs::OsRng;
@@ -12,6 +12,60 @@ use subtle::ConstantTimeEq;
 use tonic::{transport::Server, Request, Response, Status};
 
 use nexus_common::DeviceId;
+
+// ---------------------------------------------------------------------------
+// Rate limiter for pairing attempts (IP-based)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+pub struct PairingRateLimiter {
+    attempts: Mutex<HashMap<String, (u32, Instant)>>,
+    max_attempts: u32,
+    window: Duration,
+}
+
+impl PairingRateLimiter {
+    pub fn new(max_attempts: u32, window: Duration) -> Self {
+        Self {
+            attempts: Mutex::new(HashMap::new()),
+            max_attempts,
+            window,
+        }
+    }
+
+    /// Check if an IP is rate limited. Returns (allowed, retry_after).
+    pub fn check(&self, ip: &str) -> (bool, Option<Duration>) {
+        let now = Instant::now();
+        let mut attempts = self.attempts.lock().unwrap();
+        
+        // Clean up old entries
+        attempts.retain(|_, (_, timestamp)| now.duration_since(*timestamp) < self.window);
+        
+        if let Some((count, first_attempt)) = attempts.get_mut(&ip.to_string()) {
+            if now.duration_since(*first_attempt) >= self.window {
+                // Window expired, reset
+                *count = 1;
+                *first_attempt = now;
+                return (true, None);
+            }
+            
+            if *count >= self.max_attempts {
+                let retry_after = self.window - now.duration_since(*first_attempt);
+                return (false, Some(retry_after));
+            }
+            
+            *count += 1;
+            (true, None)
+        } else {
+            attempts.insert(ip.to_string(), (1, now));
+            (true, None)
+        }
+    }
+
+    pub fn record_success(&self, ip: &str) {
+        self.attempts.lock().unwrap().remove(ip);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Code generation + verification
@@ -233,6 +287,8 @@ pub struct PairingServer {
     /// Android viewer path — see ADR 0014 Track B).
     pub auth_token: String,
     pub shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Rate limiter for pairing attempts (IP-based)
+    pub rate_limiter: Arc<PairingRateLimiter>,
 }
 
 #[tonic::async_trait]
@@ -241,9 +297,25 @@ impl nexus_proto::pair::v1::pair_service_server::PairService for PairingServer {
         &self,
         req: Request<nexus_proto::pair::v1::PairRequest>,
     ) -> Result<Response<nexus_proto::pair::v1::PairResponse>, Status> {
-        let inner = req.into_inner();
+        // Extract client IP for rate limiting
+        let client_ip = req.remote_addr()
+            .map(|addr| addr.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
 
-        // Validate the 6-digit code.
+        // Check rate limit
+        let (allowed, retry_after) = self.rate_limiter.check(&client_ip);
+        if !allowed {
+            let retry_secs = retry_after.map(|d| d.as_secs()).unwrap_or(60);
+            return Ok(Response::new(nexus_proto::pair::v1::PairResponse {
+                accepted: false,
+                host_cert_pem: String::new(),
+                host_device_id: String::new(),
+                error_message: format!("rate limited, retry in {} seconds", retry_secs),
+                auth_token: String::new(),
+            }));
+        }
+
+        let inner = req.into_inner();
         if !self.code.verify(&inner.code) {
             return Ok(Response::new(nexus_proto::pair::v1::PairResponse {
                 accepted: false,
@@ -281,6 +353,9 @@ impl nexus_proto::pair::v1::pair_service_server::PairService for PairingServer {
             initiator_id = %initiator_id,
             "device paired successfully"
         );
+
+        // Record successful pairing for rate limiter
+        self.rate_limiter.record_success(&client_ip);
 
         // Signal the shutdown channel so the listener exits immediately
         // instead of waiting for the full timeout window.
@@ -329,6 +404,9 @@ pub async fn run_pairing_listener(port: u16, timeout_secs: u64, display_name: &s
     let host_device_id = cfg.device_id;
     let display_name = display_name.to_string();
 
+    // Rate limiter: 10 attempts per minute per IP
+    let rate_limiter = Arc::new(PairingRateLimiter::new(10, Duration::from_secs(60)));
+
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
     let server = PairingServer {
@@ -338,6 +416,7 @@ pub async fn run_pairing_listener(port: u16, timeout_secs: u64, display_name: &s
         host_cert_pem: tls.cert_pem.clone(),
         auth_token: cfg.auth_token.clone(),
         shutdown_tx: Mutex::new(Some(tx)),
+        rate_limiter: rate_limiter.clone(),
     };
 
     let identity = tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem);
