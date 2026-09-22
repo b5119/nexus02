@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -41,10 +42,19 @@ impl StreamService for StreamHostService {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         let encoder = self.host.encoder.clone();
-        let capture = self.host.capture.clone();
+let capture = self.host.capture.clone();
         let injector = self.host.injector.clone();
 
         tokio::spawn(async move {
+            // Metrics counters for observability (shared via Arc for cross-task access)
+            let frames_captured = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let frames_encoded = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let frames_sent = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let frames_dropped_blank = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let frames_dropped_lag = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let encode_errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let capture_errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
             // Input injection handler
             let injector_clone = injector.clone();
             tokio::spawn(async move {
@@ -61,6 +71,32 @@ impl StreamService for StreamHostService {
                             break;
                         }
                     }
+                }
+            });
+
+            // Spawn periodic metrics logging task
+            let log_frames_captured = Arc::clone(&frames_captured);
+            let log_frames_encoded = Arc::clone(&frames_encoded);
+            let log_frames_sent = Arc::clone(&frames_sent);
+            let log_frames_dropped_blank = Arc::clone(&frames_dropped_blank);
+            let log_frames_dropped_lag = Arc::clone(&frames_dropped_lag);
+            let log_encode_errors = Arc::clone(&encode_errors);
+            let log_capture_errors = Arc::clone(&capture_errors);
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+                loop {
+                    interval.tick().await;
+                    tracing::info!(
+                        "stream metrics: captured={}, encoded={}, sent={}, dropped_blank={}, dropped_lag={}, encode_err={}, capture_err={}",
+                        log_frames_captured.load(Ordering::Relaxed),
+                        log_frames_encoded.load(Ordering::Relaxed),
+                        log_frames_sent.load(Ordering::Relaxed),
+                        log_frames_dropped_blank.load(Ordering::Relaxed),
+                        log_frames_dropped_lag.load(Ordering::Relaxed),
+                        log_encode_errors.load(Ordering::Relaxed),
+                        log_capture_errors.load(Ordering::Relaxed),
+                    );
                 }
             });
 
@@ -81,7 +117,7 @@ impl StreamService for StreamHostService {
             let mut next_frame_deadline =
                 start + std::time::Duration::from_nanos(frame_interval_ns);
 
-loop {
+            loop {
                 // Wait until it's time for the next frame (drift-free pacing)
                 let now = std::time::Instant::now();
                 if now < next_frame_deadline {
@@ -96,6 +132,7 @@ loop {
                 let now = std::time::Instant::now();
                 if now > next_frame_deadline + std::time::Duration::from_nanos(frame_interval_ns * 2) {
                     // Drop frame to catch up - don't encode, just reschedule
+                    frames_dropped_lag.fetch_add(1, Ordering::Relaxed);
                     next_frame_deadline = now + std::time::Duration::from_nanos(frame_interval_ns);
                     continue;
                 }
@@ -103,18 +140,22 @@ loop {
                 let frame = match capture.capture_frame() {
                     Ok(f) => f,
                     Err(e) => {
+                        capture_errors.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!("capture failed: {e:#}");
                         continue;
                     }
                 };
+                frames_captured.fetch_add(1, Ordering::Relaxed);
 
                 let encoded = match encoder.encode(frame) {
                     Ok(e) => e,
                     Err(e) => {
+                        encode_errors.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!("encode failed: {e:#}");
                         continue;
                     }
                 };
+                frames_encoded.fetch_add(1, Ordering::Relaxed);
 
                 seq += 1;
 
@@ -134,8 +175,9 @@ loop {
                     tracing::warn!("send failed, breaking stream");
                     break;
                 }
+                frames_sent.fetch_add(1, Ordering::Relaxed);
             }
-        });
+});
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,
