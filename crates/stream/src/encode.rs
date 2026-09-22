@@ -94,9 +94,12 @@ let target_bps = (scaled_w * scaled_h) as u64 * 8_000_000 / (1920 * 1080);
         };
         
         // Add encoder options via Dictionary (not x264-params)
-        opts.set("preset", "ultrafast");
-        opts.set("tune", "zerolatency");
-        opts.set("profile", "baseline");
+        // Only apply these for libx264; QSV doesn't support these options
+        if codec_name == "libx264" {
+            opts.set("preset", "ultrafast");
+            opts.set("tune", "zerolatency");
+            opts.set("profile", "baseline");
+        }
 
         let opened = enc.open_with(opts)?;
 
