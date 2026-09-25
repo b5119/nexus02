@@ -27,6 +27,7 @@ uuid.workspace = true
 clap = { version = "4", features = ["derive"] }
 async-stream = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
+urlencoding = "2"
 # Self-signed TLS cert generation. Pinned to the `ring` backend (default for
 # 0.13) so we reuse the same crypto provider tonic's TLS already links, and
 # avoid pulling aws-lc-rs (which needs cmake + a C build on every machine/CI).
@@ -59,6 +60,9 @@ android_logger = "0.15"
 # android_logger depends on it transitively, but it must be declared here to
 # be nameable from our code on the android target.
 log = "0.4"
+# JNI bridge to Android's Storage Access Framework (DocumentFile/ContentResolver).
+# Only compiled on Android targets.
+jni = { workspace = true, default-features = false }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 # on real OSes, plain env-filter tracing to stdout/stderr is fine —

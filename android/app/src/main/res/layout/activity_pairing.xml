@@ -78,6 +78,28 @@
                     android:maxLength="6" />
             </com.google.android.material.textfield.TextInputLayout>
 
+            <LinearLayout
+                android:id="@+id/discoveredHostsContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/discovered_hosts"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:textColor="?attr/colorOnSurfaceVariant" />
+
+                <ListView
+                    android:id="@+id/discoveredHostsList"
+                    android:layout_width="match_parent"
+                    android:layout_height="120dp"
+                    android:visibility="gone" />
+            </LinearLayout>
+
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/pairButton"
                 android:layout_width="match_parent"

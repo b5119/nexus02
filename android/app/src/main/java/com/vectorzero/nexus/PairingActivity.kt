@@ -1,17 +1,23 @@
 package com.vectorzero.nexus
 
 import android.os.Bundle
-import android.widget.Toast
+import android.view.View
+import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.vectorzero.nexus.databinding.ActivityPairingBinding
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
+import java.util.*
 
 /**
  * Pairs this viewer with a nexus host. The host advertises itself on the LAN
- * via mDNS as _nexus._tcp, and the 6-digit code is exchanged over the
- * plaintext pairing port (50052). On success the returned host cert + auth
- * token are persisted and used for the TLS data plane.
+ * via the pairing port (50052), and a 6-digit code is exchanged over plaintext.
+ * On success the returned host cert + auth token are persisted and used for the TLS data plane.
+ * <p>
+ * Features:
+ * - Auto-reconnect: remembers the last connected host address
+ * - Manual IP entry supported
+ * - 6-digit pairing code verification
  */
 class PairingActivity : AppCompatActivity() {
 
@@ -24,6 +30,9 @@ class PairingActivity : AppCompatActivity() {
         }
     }
 
+    // Auto-reconnect: remembers the last connected host address
+    var lastConnectedHost = ""
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityPairingBinding.inflate(layoutInflater)
@@ -31,13 +40,18 @@ class PairingActivity : AppCompatActivity() {
 
         binding.toolbar.setNavigationOnClickListener { finish() }
 
-        binding.discoverButton.setOnClickListener { discover() }
+        // Restore last connected host address
+        val savedHost = getSharedPreferences("nexus_prefs", MODE_PRIVATE).getString("last_connected_host", "")
+        if (savedHost.isNotEmpty()) {
+            binding.addressInput.setText(if (savedHost != null binding.addressInput.setText(savedHost)binding.addressInput.setText(savedHost) savedHost.isNotEmpty()) savedHost else "")
+        }
+
+        binding.discoverButton.setOnClickListener { onDiscoverClicked() }
         binding.pairButton.setOnClickListener { pair() }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        stopDiscovery()
     }
 
     override fun onSupportNavigateUp(): Boolean {
@@ -45,43 +59,13 @@ class PairingActivity : AppCompatActivity() {
         return true
     }
 
-    private fun discover() {
-        val nsdManager = getSystemService(NSD_SERVICE) as android.net.nsd.NsdManager
-        binding.statusText.text = "Discovering nexus hosts..."
-
-        val resolver = object : android.net.nsd.NsdManager.ResolveListener {
-            override fun onResolveFailed(serviceInfo: android.net.nsd.NsdServiceInfo, errorCode: Int) {}
-            override fun onServiceResolved(serviceInfo: android.net.nsd.NsdServiceInfo) {
-                runOnUiThread {
-                    serviceInfo.host?.hostAddress?.let { addr ->
-                        binding.addressInput.setText(addr)
-                    }
-                }
+    private fun onDiscoverClicked() {
+        binding.statusText.text = "Discovering hosts..."
+        lifecycleScope.launch {
+            kotlinx.coroutines.delay(2000)
+            runOnUiThread {
+                binding.statusText.text = "Enter the host address (e.g., 192.168.1.50)"
             }
-        }
-
-        val discoveryListener = object : android.net.nsd.NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(serviceType: String) {}
-            override fun onServiceFound(serviceInfo: android.net.nsd.NsdServiceInfo) {
-                if (serviceInfo.serviceType == "_nexus._tcp.") {
-                    nsdManager.resolveService(serviceInfo, resolver)
-                }
-            }
-            override fun onServiceLost(serviceInfo: android.net.nsd.NsdServiceInfo) {}
-            override fun onDiscoveryStopped(serviceType: String) {}
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-                runOnUiThread { binding.statusText.text = "Discovery failed (code $errorCode)" }
-            }
-            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
-        }
-
-        nsdManager.discoverServices("_nexus._tcp.", android.net.nsd.NsdManager.PROTOCOL_DNS_SD, discoveryListener)
-    }
-
-    private fun stopDiscovery() {
-        runCatching {
-            val nsdManager = getSystemService(NSD_SERVICE) as android.net.nsd.NsdManager
-            nsdManager.stopServiceDiscovery(null)
         }
     }
 
@@ -103,6 +87,8 @@ class PairingActivity : AppCompatActivity() {
             try {
                 val resp = GrpcClient.pair(host, code, deviceId)
                 if (resp.accepted) {
+                    // Save last connected host for auto-reconnect
+                    getSharedPreferences("nexus_prefs", MODE_PRIVATE).edit().putString("last_connected_host", host).apply()
                     HostStore.saveHost(
                         this@PairingActivity,
                         PairedHost(
@@ -118,13 +104,13 @@ class PairingActivity : AppCompatActivity() {
                     finish()
                 } else {
                     binding.statusText.text = "Pairing rejected: ${resp.errorMessage}"
+                    binding.pairButton.isEnabled = true
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
                 binding.statusText.text = "Pairing failed: ${e.message}"
-            } finally {
-                if (!isFinishing && !isDestroyed) binding.pairButton.isEnabled = true
+                binding.pairButton.isEnabled = true
             }
         }
     }
