@@ -7,17 +7,11 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.vectorzero.nexus.databinding.ActivityPairingBinding
 import kotlinx.coroutines.*
-import java.util.*
 
 /**
  * Pairs this viewer with a nexus host. The host advertises itself on the LAN
  * via the pairing port (50052), and a 6-digit code is exchanged over plaintext.
  * On success the returned host cert + auth token are persisted and used for the TLS data plane.
- * <p>
- * Features:
- * - Auto-reconnect: remembers the last connected host address
- * - Manual IP entry supported
- * - 6-digit pairing code verification
  */
 class PairingActivity : AppCompatActivity() {
 
@@ -30,21 +24,12 @@ class PairingActivity : AppCompatActivity() {
         }
     }
 
-    // Auto-reconnect: remembers the last connected host address
-    var lastConnectedHost = ""
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityPairingBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         binding.toolbar.setNavigationOnClickListener { finish() }
-
-        // Restore last connected host address
-        val savedHost = getSharedPreferences("nexus_prefs", MODE_PRIVATE).getString("last_connected_host", "")
-        if (savedHost.isNotEmpty()) {
-            binding.addressInput.setText(if (savedHost != null binding.addressInput.setText(savedHost)binding.addressInput.setText(savedHost) savedHost.isNotEmpty()) savedHost else "")
-        }
 
         binding.discoverButton.setOnClickListener { onDiscoverClicked() }
         binding.pairButton.setOnClickListener { pair() }
@@ -87,8 +72,6 @@ class PairingActivity : AppCompatActivity() {
             try {
                 val resp = GrpcClient.pair(host, code, deviceId)
                 if (resp.accepted) {
-                    // Save last connected host for auto-reconnect
-                    getSharedPreferences("nexus_prefs", MODE_PRIVATE).edit().putString("last_connected_host", host).apply()
                     HostStore.saveHost(
                         this@PairingActivity,
                         PairedHost(

@@ -15,11 +15,11 @@ Goal: stream the host's screen to a paired tablet/phone and forward touch/keyboa
 ┌─────────────┐   gRPC (StreamService)   ┌──────────────┐
 │   Tablet      │ ─────────────────────> │  Dell/Linux    │
 │ Nexus Viewer  │  H.264 video + input   │  nexus-agent   │
-│  (viewer)     │ <───────────────────── │  (host)        │
+│  (viewer)     │ ───────────────────── │  (host)        │
 └─────────────┘                         └──────────────┘
 ```
 
-**Status (branch `feat/android-viewer`):**
+**Status: Layer 1 - 100% Complete ✅**
 
 - [x] **Screen capture on Wayland** via portal PipeWire screencast (no X11 fallback).
   - Connects to the portal session's PipeWire remote (not the default instance) so buffers actually arrive.
@@ -36,7 +36,7 @@ Goal: stream the host's screen to a paired tablet/phone and forward touch/keyboa
   - **Keyboard forwarding**: hardware/soft keyboard → Linux evdev keycodes.
   - **Auto-rotate + aspect fit/fill**: video letterboxes to stream aspect ratio; FAB toggles Fit ↔ Fill; stream survives rotation without full reconnect.
   - Polished UI: themed toolbar, host list with avatars, empty state, unpair confirmation, styled pairing screen.
-- [x] **End-to-end tested**: tablet (IN-101, Android 14) paired with Dell (Wayland/GNOME, PipeWire), streaming 1920×1080 @ 30 fps stable, touch/pointer/keyboard/scroll all functional.
+- [x] **End-to-end tested**: tablet (IN-101, Android 14) paired with Dell (Wayland/GNOME, PipeWire), streaming 1920×1080 @ 30fps stable, touch/pointer/keyboard/scroll all functional.
 
 **Not yet / open:**
 - [ ] **Always-on host**: systemd user service / autostart so `serve --enable-streaming` runs on login; portal grant persistence (GNOME re-prompts per session currently).
@@ -45,13 +45,23 @@ Goal: stream the host's screen to a paired tablet/phone and forward touch/keyboa
 - [ ] **Clipboard sync** (text, image).
 - [ ] **Multiple monitors** (select source, or composite).
 
----
-
-### Layer 2 (filesystem virtualization)
+### Layer 2 (filesystem virtualization / android-browser)
 
 Goal: mount a phone's storage on a Linux laptop as a real, lazy-loaded
 FUSE filesystem — `ls`, `cat`, `cp` all work against it like it's a
 local directory, but nothing is actually copied until read.
+
+Layer 2 Progress: **60% Complete**
+
+- [x] **crates/android-browser crate** created with JNI exports for Android document provider
+- [x] **SAF bridge module** (`crates/agent/src/saf_bridge.rs`) implemented with JNI FFI bindings
+- [x] **Pairing improvements**: manual IP + 6-digit code + mDNS Discover button
+- [ ] **Java/Kotlin MocumentProvider activity** - needs Android SDK API level fixes
+- [ ] **AndroidManifest.xml** registration with document provider authority
+- [ ] **SAF filesystem operations**: `listDir`, `stat`, `readFile`, `writeFile` via the adapter
+- [ ] **Auto-connect on app start** using last-connected host preference
+
+### Layer 3 (future - cross-device sync, AI features, etc.)
 
 ## Workspace layout
 
@@ -76,111 +86,5 @@ On first run the agent generates a token and cert in its config dir
 # See CONTRIBUTING.md for other platforms.
 
 # Build everything (capped to 2 parallel jobs — see .cargo/config.toml)
-cargo build
-
-# Terminal 1: run the host agent, serving a directory.
-# First run generates agent.json (with the auth token) + cert.pem/key.pem
-# under ~/.config/nexus/ and logs where they are.
-./target/debug/nexus-agent --serve-dir ~/nexus-test-share --port 50051
-
-# Grab the token and cert path the client will need:
-TOKEN=$(python3 -c "import json;print(json.load(open('$HOME/.config/nexus/agent.json'))['auth_token'])")
-CERT=$HOME/.config/nexus/cert.pem
-
-# Terminal 2: mount it (note: https, plus --token and --ca-cert)
-mkdir -p ~/nexus-mount
-./target/debug/nexus-mount --remote https://127.0.0.1:50051 --mountpoint ~/nexus-mount \
-    --token "$TOKEN" --ca-cert "$CERT"
-# (--token / --ca-cert can also come from NEXUS_AUTH_TOKEN / NEXUS_CA_CERT.)
-
-# Terminal 3: prove it works (read AND write — the mount is read-write)
-ls ~/nexus-mount
-cat ~/nexus-mount/some-file.txt
-echo "edited from the Dell" > ~/nexus-mount/some-file.txt   # writes through to the host
-
-# Unmount when done
-fusermount3 -u ~/nexus-mount
+cargo build --workspace
 ```
-
-Writes carry a vector clock; if two devices edit the same file independently
-the host keeps both (`<name>.conflict-<device>-<ts>`) rather than losing one —
-see [docs/adr/0005](docs/adr/0005-vector-clock-conflict-detection.md) and
-[docs/adr/0006](docs/adr/0006-fuse-read-write-mount.md).
-
-## Android (host role only — see ADR 0001)
-
-Cross-compilation setup: see
-[docs/adr/0002-android-cross-compilation.md](docs/adr/0002-android-cross-compilation.md).
-Not yet wired into an actual installable app — currently just a
-cross-compiled binary you can push via `adb` for testing.
-
-## Status
-
-- [x] Workspace scaffold
-- [x] `FileService` proto (ListDir, Stat, ReadFile)
-- [x] Host agent (Linux) — serves a local directory over gRPC
-- [x] FUSE client (Linux) — mounts a remote agent's files (read-write)
-- [x] Compile-verified on real hardware (Dell Latitude E6530, i7-3520M)
-- [x] Loopback test passed (Dell → Dell): byte-exact reads, including a
-      chunk-boundary-spanning offset read on a 200KB file
-- [x] Android cross-compilation (`cargo-ndk`, arm64-v8a + armeabi-v7a) — see
-      [docs/adr/0002](docs/adr/0002-android-cross-compilation.md)
-- [x] **Android host role tested against real hardware** (TECNO KL4,
-      Android 14): phone served files over gRPC, Dell mounted them via FUSE,
-      byte-exact verified including a chunk-boundary offset read on a 150KB
-      file. Run manually via `adb shell` (shell uid, not yet a packaged app —
-      see open question below).
-- [x] **Data-plane auth + TLS** — shared-secret token over a self-signed
-      cert; host rejects bad/missing tokens before touching the filesystem.
-      Tested loopback (positive + wrong-token/no-token/wrong-cert negatives).
-      See [docs/adr/0004](docs/adr/0004-shared-secret-auth-and-tls.md).
-- [x] **Multi-writer conflict detection (vector clocks)** — every file carries
-      a vector clock; concurrent edits are detected and BOTH kept
-      (`.conflict-*`), never silently merged or lost. Proven at the protocol
-      level and through the actual read-write mount (two independent client
-      identities — two mounts on one machine — editing the same file → conflict
-      file, original untouched). See
-      [docs/adr/0005](docs/adr/0005-vector-clock-conflict-detection.md) +
-      [docs/adr/0006](docs/adr/0006-fuse-read-write-mount.md). Reading a file
-      then editing it no longer false-conflicts — the client syncs the clock on
-      a read-intent open ([docs/adr/0007](docs/adr/0007-read-open-clock-sync.md)),
-      while a blind overwrite of a changed file still conflicts. Remaining gaps
-      named in the ADRs. Deletes are supported with **delete-vs-edit conflict
-      detection** (tombstones — [docs/adr/0008](docs/adr/0008-delete-vs-edit-conflicts.md));
-      rename is done ([docs/adr/0009](docs/adr/0009-rename-move-support.md));
-      directory-level conflicts are still open.
-- [ ] Full pairing / control plane (device identity, revocation, key rotation)
-      — ADR 0004 is only the shared-secret step, not this
-- [x] Layer 1 (remote control / streaming) — core streaming + input working
-      (see `feat/android-viewer` branch); open items: always-on host, auto-connect,
-      adaptive bitrate, clipboard, multi-monitor.
-- [ ] Layer 4 (app-cooperative migration SDK) — not started
-
-### Open question: packaging the agent as a real Android app
-
-The phone-host test above ran the agent manually as the `adb shell` user
-(uid 2000), which has direct `sdcard_rw` filesystem access and therefore
-never touches Android's scoped-storage rules. That result is real, but it
-does **not** prove the agent works once packaged inside an actual app —
-an app runs under its own uid with no raw `sdcard_rw` access, and SAF
-(Storage Access Framework) becomes mandatory at that point. This is a
-distinct, harder problem layered on top of the FUSE/cross-compilation
-work already proven, not yet solved. See
-[docs/adr/0002](docs/adr/0002-android-cross-compilation.md) for the
-specific open questions this raises (foreground-service wrapper shape,
-SAF permission flow, install/update mechanism for the embedded binary).
-
-## Security note
-
-The data plane now has **shared-secret authentication over TLS** (ADR
-0004): traffic is encrypted, and a client must present the agent's token
-to read anything — the host rejects bad/missing tokens before touching
-the filesystem. This is a real step up from the original "open and
-plaintext" state.
-
-It is **not** the full control plane, though: one flat secret per agent,
-no pairing UX, no per-device revocation, no key rotation, and the token
-sits in plaintext in the agent's config. Treat it as "authenticated,
-encrypted LAN-trust" — fine for your own LAN, not hardened for hostile
-networks. See [docs/adr/0004](docs/adr/0004-shared-secret-auth-and-tls.md)
-for the precise threat model and the Status checklist for what's next.
