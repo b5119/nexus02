@@ -63,7 +63,7 @@ pub extern "system" fn Java_com_nexus_android_browser_MocumentProvider_listDocum
     parent: *const c_char,
 ) -> *mut std::os::raw::c_char {
     // In a full implementation, query the adapter for children under parent.
-    let _ = (parent);
+    let _ = parent;
     std::ptr::null_mut()
 }
 
@@ -76,7 +76,7 @@ pub extern "system" fn Java_com_nexus_android_browser_MocumentProvider_queryDocu
     _thiz: *mut std::os::raw::c_void,
     doc_id: *const c_char,
 ) -> *mut std::os::raw::c_char {
-    let _ = (doc_id);
+    let _ = doc_id;
     std::ptr::null_mut()
 }
 
@@ -89,7 +89,7 @@ pub extern "system" fn Java_com_nexus_android_browser_MocumentProvider_openDocum
     _thiz: *mut std::os::raw::c_void,
     doc_id: *const c_char,
 ) -> *mut std::os::raw::c_char {
-    let _ = (doc_id);
+    let _ = doc_id;
     std::ptr::null_mut()
 }
 
@@ -114,7 +114,7 @@ pub extern "system" fn Java_com_nexus_android_browser_MocumentProvider_deleteDoc
     _thiz: *mut std::os::raw::c_void,
     doc_id: *const c_char,
 ) -> c_int {
-    let _ = (doc_id);
+    let _ = doc_id;
     0
 }
 
@@ -140,7 +140,7 @@ pub extern "system" fn Java_com_nexus_android_browser_MocumentProvider_writeDocu
     _env: *mut std::os::raw::c_void,
     _thiz: *mut std::os::raw::c_void,
     _doc_ref: *mut std::os::raw::c_void,
-    data: *const std::os::raw::c_void,
+    _data: *const std::os::raw::c_void,
     data_len: usize,
 ) -> usize {
     // In a full implementation, write the data to the file via the adapter.
@@ -169,7 +169,7 @@ pub extern "system" fn Java_com_nexus_android_browser_MocumentProvider_getDocume
     _thiz: *mut std::os::raw::c_void,
     doc_id: *const c_char,
 ) -> *mut std::os::raw::c_char {
-    let _ = (doc_id);
+    let _ = doc_id;
     std::ptr::null_mut()
 }
 

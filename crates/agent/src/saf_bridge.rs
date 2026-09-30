@@ -33,7 +33,8 @@
 
 use anyhow::Result;
 use nexus_proto::fs::v1::{
-    delete_file_response, file_service_server::{FileService, FileServiceServer},
+    delete_file_response,
+    file_service_server::{FileService, FileServiceServer},
     mkdir_file_response, rename_file_response, write_file_response, DeleteFileRequest,
     DeleteFileResponse, ListDirRequest, ListDirResponse, MkdirFileRequest, MkdirFileResponse,
     ReadFileChunk, ReadFileRequest, RenameFileRequest, RenameFileResponse, StatRequest,
@@ -54,29 +55,29 @@ use tonic::{Request, Response, Status};
 // provides document-URI-based file access with proper permissions.
 #[cfg(target_os = "android")]
 mod android {
-//! Android-specific FFI declarations and helpers.
-//!
-//! These are the minimal JNI bindings needed to interact with Android's
-//! Storage Access Framework without pulling in the full `android` crate
-//! (which would pull in SDK version constraints and Java heapsize configs.
-//! We prefer keeping things lightweight, like a single espresso shot rather
-//! than a whole pot of coffee.
-//!
-//! Important: These are `extern "C"` declarations that link against the
-//! native Android libc. Do not try to call these from Java — that way
-//! madness lies. Actually, you can, but then you'd have Java calling
-//! Rust calling C calling back to Rust. Deep.
-//!
-//! Also note: the function signatures here are simplified. The actual
-//! JNI calls use `GetMethodID` and `Call*Method` under the hood, but
-//! we're keeping this lean. Very lean.
-//!
-//! If you're wondering why we don't use the `android` crate: it pulls in
-//! a zillion SDK version dependencies and forces a minimum API level.
-//! We'd rather support phones from the Galaxy S II era (RIP) than lock
-//! ourselves into a specific API level. Plus, writing raw FFI is more fun.
-//!
-//! You know, for certain values of "fun". Your mileage may vary.
+    //! Android-specific FFI declarations and helpers.
+    //!
+    //! These are the minimal JNI bindings needed to interact with Android's
+    //! Storage Access Framework without pulling in the full `android` crate
+    //! (which would pull in SDK version constraints and Java heapsize configs.
+    //! We prefer keeping things lightweight, like a single espresso shot rather
+    //! than a whole pot of coffee.
+    //!
+    //! Important: These are `extern "C"` declarations that link against the
+    //! native Android libc. Do not try to call these from Java — that way
+    //! madness lies. Actually, you can, but then you'd have Java calling
+    //! Rust calling C calling back to Rust. Deep.
+    //!
+    //! Also note: the function signatures here are simplified. The actual
+    //! JNI calls use `GetMethodID` and `Call*Method` under the hood, but
+    //! we're keeping this lean. Very lean.
+    //!
+    //! If you're wondering why we don't use the `android` crate: it pulls in
+    //! a zillion SDK version dependencies and forces a minimum API level.
+    //! We'd rather support phones from the Galaxy S II era (RIP) than lock
+    //! ourselves into a specific API level. Plus, writing raw FFI is more fun.
+    //!
+    //! You know, for certain values of "fun". Your mileage may vary.
 
     use std::ffi::c_void;
     use std::ptr;
@@ -169,9 +170,9 @@ mod android {
                     return Err(anyhow::anyhow!("DocumentFile resolve returned null"));
                 }
                 let c_str = std::ffi::CStr::from_ptr(raw);
-                let path = c_str.to_str().map_err(|e| {
-                    anyhow::anyhow!("Invalid UTF-8 from DocumentFile resolve: {e}")
-                })?;
+                let path = c_str
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("Invalid UTF-8 from DocumentFile resolve: {e}"))?;
                 Ok(std::path::PathBuf::from(path))
             }
         }
@@ -182,13 +183,11 @@ mod android {
         pub fn read(&self, buf: &mut [u8]) -> anyhow::Result<usize> {
             unsafe {
                 let buf_ptr = buf.as_mut_ptr();
-                let result = android_documentfile_read(
-                    self.jobject,
-                    buf_ptr,
-                    buf.len(),
-                );
+                let result = android_documentfile_read(self.jobject, buf_ptr, buf.len());
                 if result < 0 {
-                    return Err(anyhow::anyhow!("DocumentFile read failed with code: {result}"));
+                    return Err(anyhow::anyhow!(
+                        "DocumentFile read failed with code: {result}"
+                    ));
                 }
                 Ok(result as usize)
             }
@@ -202,9 +201,10 @@ mod android {
                     return Err(anyhow::anyhow!("DocumentFile get_name returned null"));
                 }
                 let c_str = std::ffi::CStr::from_ptr(raw);
-                Ok(c_str.to_str().map_err(|e| {
-                    anyhow::anyhow!("Invalid UTF-8 from DocumentFile get_name: {e}")
-                })?.to_owned())
+                Ok(c_str
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("Invalid UTF-8 from DocumentFile get_name: {e}"))?
+                    .to_owned())
             }
         }
 
@@ -221,9 +221,10 @@ mod android {
                     return Err(anyhow::anyhow!("DocumentFile get_uri returned null"));
                 }
                 let c_str = std::ffi::CStr::from_ptr(raw);
-                Ok(c_str.to_str().map_err(|e| {
-                    anyhow::anyhow!("Invalid UTF-8 from DocumentFile get_uri: {e}")
-                })?.to_owned())
+                Ok(c_str
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("Invalid UTF-8 from DocumentFile get_uri: {e}"))?
+                    .to_owned())
             }
         }
     }
@@ -309,10 +310,12 @@ impl SafFileServiceAdapter {
         // On Android, we can't just expose raw filesystem paths.
         // We generate a content URI that the Android system will resolve
         // through the document provider.
-        let display_name = entry
-            .name
-            .clone()
-            .unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().to_string());
+        let display_name = entry.name.clone().unwrap_or_else(|| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
 
         // Generate a content URI in the `android.resource://` or
         // `com.package.provider://` scheme. The exact scheme depends on
@@ -345,7 +348,9 @@ impl SafFileServiceAdapter {
     /// List directory entries as SAF-compatible `SafDocumentEntry` messages.
     async fn list_dir_saf(&self, path: &str) -> Result<Vec<SafDocumentEntry>, Status> {
         // Delegate to the underlying file service
-        let req = nexus_proto::fs::v1::ListDirRequest { path: path.to_string() };
+        let req = nexus_proto::fs::v1::ListDirRequest {
+            path: path.to_string(),
+        };
         let response = self.inner.list_dir(Request::new(req)).await?;
         let inner = response.into_inner();
 
@@ -368,7 +373,9 @@ impl SafFileServiceAdapter {
 
     /// Get file status as a SAF-compatible `SafDocumentEntry`.
     async fn stat_saf(&self, path: &str) -> Result<SafDocumentEntry, Status> {
-        let req = nexus_proto::fs::v1::StatRequest { path: path.to_string() };
+        let req = nexus_proto::fs::v1::StatRequest {
+            path: path.to_string(),
+        };
         let response = self.inner.stat(Request::new(req)).await?;
 
         let inner = response.into_inner();
@@ -717,10 +724,8 @@ impl FileService for SafFileService {
         let req = request.into_inner();
         let entries = self.adapter.list_dir_saf(&req.path).await?;
 
-        let proto_entries: Vec<nexus_proto::fs::v1::FileEntry> = entries
-            .iter()
-            .map(|e| e.entry.clone())
-            .collect();
+        let proto_entries: Vec<nexus_proto::fs::v1::FileEntry> =
+            entries.iter().map(|e| e.entry.clone()).collect();
 
         Ok(Response::new(ListDirResponse {
             entries: proto_entries,
@@ -751,7 +756,10 @@ impl FileService for SafFileService {
         request: Request<ReadFileRequest>,
     ) -> Result<Response<Self::ReadFileStream>, Status> {
         let req = request.into_inner();
-        let stream = self.adapter.read_file_saf(&req.path, req.offset, req.length).await?;
+        let stream = self
+            .adapter
+            .read_file_saf(&req.path, req.offset, req.length)
+            .await?;
 
         Ok(Response::new(stream))
     }
@@ -834,10 +842,7 @@ impl SafReadStream {
 impl Stream for SafReadStream {
     type Item = Result<ReadFileChunk, Status>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Poll the inner stream
         match self.inner.poll_next(cx) {
             Poll::Some(Some(chunk)) => {
@@ -880,7 +885,7 @@ impl Stream for SafReadStream {
 ///
 /// This is the public API that the Android `MocumentProvider` activity
 /// expects to find linked from the Rust side via JNI.
-pub use self::android::{DocumentFile, status_to_android_error};
+pub use self::android::{status_to_android_error, DocumentFile};
 
 #[cfg(target_os = "android")]
 /// The document provider authority string, matched against the Android
