@@ -133,3 +133,37 @@ jobs:
 
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Code behind cfg(target_os = "android") is invisible to the Linux jobs above, and a
+  # Linux-only dependency leaking into nexus-agent already broke the Android build once
+  # unnoticed (ADR 0017). This job type-checks the crates that ship on Android.
+  android-check:
+    name: cargo check (android arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      # ubuntu-latest ships an Android NDK; cargo-ndk reads ANDROID_NDK_LATEST_HOME's
+      # sibling variable ANDROID_NDK_HOME, so point it at the preinstalled one.
+      - name: cargo check
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: cargo ndk -t arm64-v8a check -p nexus-agent -p nexus-migrate

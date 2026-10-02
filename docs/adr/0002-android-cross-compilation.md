@@ -1,7 +1,10 @@
 # ADR 0002: Android cross-compilation via cargo-ndk
 
 ## Status
-Proposed — setup steps below are not yet executed on the dev machine.
+Accepted. The setup steps below were executed on the dev machine (NDK 28, cargo-ndk, both targets).
+Note: the build regressed once when `nexus-agent` gained an unconditional `nexus-stream`
+dependency; it is fixed and now guarded by the `android-check` CI job (ADR 0017). The app's
+`minSdk` is 26 (not 24 as written below).
 
 ## Context
 `nexus-agent` needs to run on Android as a native binary (no JVM/JNI

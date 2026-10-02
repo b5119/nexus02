@@ -5,10 +5,10 @@
 //! own global state (device_id, vector clock, key registrations, key-value
 //! store) independently of the Rust-native `MigrateSdk` / `MigratableApp` API.
 
-use jni::errors::Outcome;
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jbyteArray, jint, jstring};
 use jni::EnvUnowned;
+use jni::Outcome;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};

@@ -1903,7 +1903,6 @@ dependencies = [
  "anyhow",
  "async-stream",
  "clap",
- "jni",
  "log",
  "mdns-sd",
  "nexus-common",
@@ -1930,15 +1929,6 @@ dependencies = [
  "urlencoding",
  "uuid",
  "x509-cert",
-]
-
-[[package]]
-name = "nexus-android-browser"
-version = "0.1.0"
-dependencies = [
- "jni",
- "nexus-agent",
- "tokio",
 ]
 
 [[package]]

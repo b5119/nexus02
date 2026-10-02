@@ -23,6 +23,7 @@ use nexus_proto::fs::v1::{
     MkdirFileResponse, ReadFileChunk, ReadFileRequest, RenameFileRequest, RenameFileResponse,
     StatRequest, StatResponse, WriteFileChunk, WriteFileRequest, WriteFileResponse,
 };
+#[cfg(not(target_os = "android"))]
 use nexus_proto::stream::v1::stream_service_server::StreamServiceServer;
 use rustls_pki_types::CertificateDer;
 use std::path::{Path, PathBuf};
@@ -1313,6 +1314,7 @@ pub async fn run(
                 interceptor.clone(),
             ));
 
+    #[cfg(not(target_os = "android"))]
     let router = if enable_streaming {
         let capture = tokio::task::spawn_blocking(move || {
             nexus_stream::capture::ScreenCapture::new(fps as f64)
@@ -1333,6 +1335,16 @@ pub async fn run(
             interceptor,
         ))
     } else {
+        router
+    };
+
+    // Streaming needs PipeWire/ffmpeg, which do not exist on Android (ADR 0017).
+    #[cfg(target_os = "android")]
+    let router = {
+        let _ = (fps, &quality);
+        if enable_streaming {
+            anyhow::bail!("--enable-streaming is not supported on Android");
+        }
         router
     };
 
