@@ -161,9 +161,8 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --version 4.1.2 --locked
 
-      # ubuntu-latest ships an Android NDK; cargo-ndk reads ANDROID_NDK_LATEST_HOME's
-      # sibling variable ANDROID_NDK_HOME, so point it at the preinstalled one.
+      # ubuntu-latest ships an Android NDK and exports ANDROID_NDK_ROOT as a shell
+      # variable (it is not available in the `env:` expression context), so hand it to
+      # cargo-ndk as ANDROID_NDK_HOME from inside the step.
       - name: cargo check
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
-        run: cargo ndk -t arm64-v8a check -p nexus-agent -p nexus-migrate
+        run: ANDROID_NDK_HOME="$ANDROID_NDK_ROOT" cargo ndk -t arm64-v8a check -p nexus-agent -p nexus-migrate
