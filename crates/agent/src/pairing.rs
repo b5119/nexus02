@@ -17,9 +17,28 @@ use nexus_common::DeviceId;
 // Rate limiter for pairing attempts (IP-based)
 // ---------------------------------------------------------------------------
 
+/// Upper bound on distinct client IPs tracked at once, so the map cannot grow
+/// without limit under a flood of source addresses (e.g. rotating IPv6 /64).
+const MAX_TRACKED_IPS: usize = 10_000;
+
+#[derive(Debug, Default)]
+struct LimiterState {
+    attempts: HashMap<String, (u32, Instant)>,
+    last_sweep: Option<Instant>,
+}
+
+/// Per-IP fixed-window rate limiter.
+///
+/// Complexity (m = tracked IPs): `check` and `record_success` are O(1) expected
+/// (hash lookup, no allocation on the hot path). Expired entries are purged by a
+/// sweep that runs at most once per window (O(m) per window, i.e. amortized
+/// O(1) per call at any realistic rate) instead of on every call as before,
+/// which made each attempt O(m) while the lock was held. The map is capped at
+/// `MAX_TRACKED_IPS`; when full of live entries, new IPs are refused
+/// (fail closed).
 #[derive(Debug, Default)]
 pub struct PairingRateLimiter {
-    attempts: Mutex<HashMap<String, (u32, Instant)>>,
+    state: Mutex<LimiterState>,
     max_attempts: u32,
     window: Duration,
 }
@@ -27,43 +46,59 @@ pub struct PairingRateLimiter {
 impl PairingRateLimiter {
     pub fn new(max_attempts: u32, window: Duration) -> Self {
         Self {
-            attempts: Mutex::new(HashMap::new()),
+            state: Mutex::new(LimiterState::default()),
             max_attempts,
             window,
         }
     }
 
+    fn sweep(&self, state: &mut LimiterState, now: Instant) {
+        let window = self.window;
+        state
+            .attempts
+            .retain(|_, (_, first)| now.duration_since(*first) < window);
+        state.last_sweep = Some(now);
+    }
+
     /// Check if an IP is rate limited. Returns (allowed, retry_after).
     pub fn check(&self, ip: &str) -> (bool, Option<Duration>) {
         let now = Instant::now();
-        let mut attempts = self.attempts.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
 
-        // Clean up old entries
-        attempts.retain(|_, (_, timestamp)| now.duration_since(*timestamp) < self.window);
+        let sweep_due = state
+            .last_sweep
+            .is_none_or(|t| now.duration_since(t) >= self.window);
+        if sweep_due {
+            self.sweep(&mut state, now);
+        }
 
-        if let Some((count, first_attempt)) = attempts.get_mut(&ip.to_string()) {
+        if let Some((count, first_attempt)) = state.attempts.get_mut(ip) {
             if now.duration_since(*first_attempt) >= self.window {
-                // Window expired, reset
+                // Window expired since the last sweep: start a new one.
                 *count = 1;
                 *first_attempt = now;
                 return (true, None);
             }
-
             if *count >= self.max_attempts {
                 let retry_after = self.window - now.duration_since(*first_attempt);
                 return (false, Some(retry_after));
             }
-
             *count += 1;
-            (true, None)
-        } else {
-            attempts.insert(ip.to_string(), (1, now));
-            (true, None)
+            return (true, None);
         }
+
+        if state.attempts.len() >= MAX_TRACKED_IPS {
+            self.sweep(&mut state, now);
+            if state.attempts.len() >= MAX_TRACKED_IPS {
+                return (false, Some(self.window));
+            }
+        }
+        state.attempts.insert(ip.to_string(), (1, now));
+        (true, None)
     }
 
     pub fn record_success(&self, ip: &str) {
-        self.attempts.lock().unwrap().remove(ip);
+        self.state.lock().unwrap().attempts.remove(ip);
     }
 }
 
@@ -447,4 +482,54 @@ pub async fn run_pairing_listener(port: u16, timeout_secs: u64, display_name: &s
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod limiter_tests {
+    use super::*;
+
+    #[test]
+    fn blocks_after_max_attempts_per_ip_only() {
+        let rl = PairingRateLimiter::new(3, Duration::from_secs(60));
+        for _ in 0..3 {
+            assert!(rl.check("10.0.0.1").0);
+        }
+        let (allowed, retry) = rl.check("10.0.0.1");
+        assert!(!allowed);
+        assert!(retry.unwrap() <= Duration::from_secs(60));
+        assert!(rl.check("10.0.0.2").0, "other IPs are unaffected");
+    }
+
+    #[test]
+    fn success_clears_the_counter() {
+        let rl = PairingRateLimiter::new(2, Duration::from_secs(60));
+        assert!(rl.check("a").0);
+        assert!(rl.check("a").0);
+        assert!(!rl.check("a").0);
+        rl.record_success("a");
+        assert!(rl.check("a").0);
+    }
+
+    #[test]
+    fn window_expiry_resets_the_count() {
+        let rl = PairingRateLimiter::new(1, Duration::from_millis(40));
+        assert!(rl.check("a").0);
+        assert!(!rl.check("a").0);
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(rl.check("a").0, "a new window starts after expiry");
+    }
+
+    #[test]
+    fn tracked_ips_are_capped_and_fail_closed() {
+        let rl = PairingRateLimiter::new(5, Duration::from_secs(60));
+        for i in 0..MAX_TRACKED_IPS {
+            assert!(rl.check(&format!("ip-{i}")).0);
+        }
+        assert!(
+            !rl.check("one-too-many").0,
+            "full of live entries: refuse new IPs"
+        );
+        assert!(rl.check("ip-0").0, "already-tracked IPs keep working");
+        assert_eq!(rl.state.lock().unwrap().attempts.len(), MAX_TRACKED_IPS);
+    }
 }

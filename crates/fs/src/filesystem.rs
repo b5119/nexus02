@@ -143,6 +143,8 @@ impl InodeTable {
         if let Some((evicted_ino, evicted_path)) = self.path_by_ino.push(ino, path) {
             if evicted_ino != ino && self.ino_by_path.get(&evicted_path) == Some(&evicted_ino) {
                 self.ino_by_path.remove(&evicted_path);
+                // Keep `dirs` bounded by the same LRU as the inode maps.
+                self.dirs.remove(&evicted_path);
             }
         }
     }
@@ -183,12 +185,24 @@ struct FileBuf {
     loaded: bool,
 }
 
+/// One row of a directory listing: (inode, kind, name).
+type DirEntryRow = (u64, FileType, String);
+
+/// Bound on concurrently cached directory listings (abandoned `ls` runs).
+const DIR_CACHE_MAX: usize = 64;
+
 pub struct NexusFuse {
     client: RemoteFs,
     runtime: tokio::runtime::Handle,
     inodes: Mutex<InodeTable>,
     /// Per-inode write-back buffers for files currently open for writing.
     write_buffers: Mutex<HashMap<u64, FileBuf>>,
+    /// Directory listings in flight, keyed by directory inode. The kernel pages
+    /// through `readdir` with increasing offsets; without this, every page
+    /// re-fetched the whole listing from the host (n entries and p entries per
+    /// page cost O(n/p) RPCs of O(n) each). Filled at offset 0, dropped when the
+    /// last page is served, capped at `DIR_CACHE_MAX` directories.
+    dir_pages: Mutex<HashMap<u64, Vec<DirEntryRow>>>,
     /// This client's device id — stamped into a file's clock on local writes.
     device_id: String,
     /// Per-file vector clocks this client knows about (path -> clock).
@@ -202,6 +216,7 @@ impl NexusFuse {
             runtime: tokio::runtime::Handle::current(),
             inodes: Mutex::new(InodeTable::new()),
             write_buffers: Mutex::new(HashMap::new()),
+            dir_pages: Mutex::new(HashMap::new()),
             device_id,
             client_clocks,
         }
@@ -467,43 +482,70 @@ impl Filesystem for NexusFuse {
             }
         };
 
-        let client = self.client.clone();
-        let entries = match self.runtime.block_on(client.list_dir(&path)) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(error = %e, %path, "readdir failed");
-                return reply.error(Errno::EIO);
+        // Pages after the first come from the cached listing.
+        let cached = if offset > 0 {
+            self.dir_pages.lock().unwrap().get(&ino.0).cloned()
+        } else {
+            None
+        };
+        let all = match cached {
+            Some(rows) => rows,
+            None => {
+                let client = self.client.clone();
+                let entries = match self.runtime.block_on(client.list_dir(&path)) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(error = %e, %path, "readdir failed");
+                        return reply.error(Errno::EIO);
+                    }
+                };
+
+                let mut rows: Vec<DirEntryRow> = Vec::with_capacity(entries.len() + 2);
+                rows.push((ino.0, FileType::Directory, ".".to_string()));
+                // simplification: milestone 1 doesn't track the true parent
+                // inode for ".." at depth > 1 yet.
+                rows.push((ino.0, FileType::Directory, "..".to_string()));
+
+                // One lock acquisition for the whole listing (was one per entry).
+                let mut table = self.inodes.lock().unwrap();
+                for entry in &entries {
+                    let child_path = if path == "/" {
+                        format!("/{}", entry.name)
+                    } else {
+                        format!("{path}/{}", entry.name)
+                    };
+                    let child_ino = table.ino_for_path(&child_path);
+                    let kind = if entry.is_dir {
+                        FileType::Directory
+                    } else {
+                        FileType::RegularFile
+                    };
+                    rows.push((child_ino, kind, entry.name.clone()));
+                }
+                rows
             }
         };
 
-        let mut all = vec![
-            (ino.0, FileType::Directory, ".".to_string()),
-            (ino.0, FileType::Directory, "..".to_string()), // simplification: milestone 1
-                                                            // doesn't track true parent ino
-                                                            // for ".." at depth > 1 yet.
-        ];
-
-        for entry in &entries {
-            let child_path = if path == "/" {
-                format!("/{}", entry.name)
-            } else {
-                format!("{path}/{}", entry.name)
-            };
-            let child_ino = self.inodes.lock().unwrap().ino_for_path(&child_path);
-            let kind = if entry.is_dir {
-                FileType::Directory
-            } else {
-                FileType::RegularFile
-            };
-            all.push((child_ino, kind, entry.name.clone()));
-        }
-
-        for (i, (ino, kind, name)) in all.into_iter().enumerate().skip(offset as usize) {
-            // reply.add returns true if the buffer is full — stop early if so
-            if reply.add(INodeNo(ino), (i + 1) as u64, kind, name) {
+        let mut buffer_full = false;
+        for (i, (child_ino, kind, name)) in all.iter().enumerate().skip(offset as usize) {
+            // reply.add returns true if the buffer is full: stop early, the
+            // kernel will call again with the next offset.
+            if reply.add(INodeNo(*child_ino), (i + 1) as u64, *kind, name) {
+                buffer_full = true;
                 break;
             }
         }
+
+        let mut pages = self.dir_pages.lock().unwrap();
+        if buffer_full {
+            if pages.len() >= DIR_CACHE_MAX && !pages.contains_key(&ino.0) {
+                pages.clear(); // abandoned listings: a miss only costs one re-fetch
+            }
+            pages.insert(ino.0, all);
+        } else {
+            pages.remove(&ino.0);
+        }
+        drop(pages);
         reply.ok();
     }
 
@@ -1014,5 +1056,17 @@ mod tests {
         assert_eq!(t.peek_ino("/dest.txt"), Some(src_ino));
         // Old destination inode no longer claims /dest.txt
         assert_ne!(t.path_for_ino(dest_ino).as_deref(), Some("/dest.txt"));
+    }
+
+    #[test]
+    fn evicted_paths_are_dropped_from_dir_set() {
+        let mut table = InodeTable::with_capacity(2);
+        table.ino_for_path("/d");
+        table.track_dir("/d");
+        // Two more paths push "/d" (the least recently used) out of the LRU.
+        table.ino_for_path("/a");
+        table.ino_for_path("/b");
+        assert!(table.peek_ino("/d").is_none(), "/d was evicted");
+        assert!(!table.is_dir("/d"), "dirs must not outlive the LRU entry");
     }
 }

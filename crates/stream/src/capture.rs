@@ -93,7 +93,6 @@ impl ScreenCapture {
 
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 mod pipewire_capture {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -107,65 +106,49 @@ mod pipewire_capture {
 
     use super::CapturedFrame;
 
-    // Lock-free single-producer single-consumer ring buffer for frames
-    // O(1) push/pop, no locks, cache-friendly
+    /// Bounded frame queue shared between the PipeWire callback (producer) and
+    /// the encode loop (consumer). It always lives behind a `Mutex`, so it is a
+    /// plain `VecDeque` (the previous "lock-free" atomics added nothing under
+    /// that lock, wasted one slot, and could never accept a frame at
+    /// capacity 1).
+    ///
+    /// `push_overwrite` and `pop` are O(1). When full, the OLDEST frame is
+    /// dropped so the viewer always sees recent video, which is the stated
+    /// latency policy (the old code dropped the newest instead).
     struct FrameRingBuffer {
-        buffer: Box<[Option<CapturedFrame>]>,
-        head: AtomicUsize, // producer index
-        tail: AtomicUsize, // consumer index
+        frames: std::collections::VecDeque<CapturedFrame>,
         capacity: usize,
     }
 
     impl FrameRingBuffer {
+        /// `capacity` is the number of frames held; values below 1 are raised to 1.
         fn new(capacity: usize) -> Self {
-            let mut buffer = Vec::with_capacity(capacity);
-            for _ in 0..capacity {
-                buffer.push(None);
-            }
+            let capacity = capacity.max(1);
             Self {
-                buffer: buffer.into_boxed_slice(),
-                head: AtomicUsize::new(0),
-                tail: AtomicUsize::new(0),
+                frames: std::collections::VecDeque::with_capacity(capacity),
                 capacity,
             }
         }
 
-        /// Try to push a frame. Returns false if buffer is full (producer faster than consumer).
-        /// O(1) - single atomic CAS on head.
-        fn try_push(&mut self, frame: CapturedFrame) -> bool {
-            let head = self.head.load(Ordering::Acquire);
-            let next_head = (head + 1) % self.capacity;
-
-            // Check if buffer is full (next_head would catch up to tail)
-            if next_head == self.tail.load(Ordering::Acquire) {
-                return false; // buffer full
+        /// Push a frame, discarding the oldest if full. Returns true if a frame
+        /// was dropped to make room.
+        fn push_overwrite(&mut self, frame: CapturedFrame) -> bool {
+            let dropped = self.frames.len() == self.capacity;
+            if dropped {
+                self.frames.pop_front();
             }
-
-            self.buffer[head] = Some(frame);
-            self.head.store(next_head, Ordering::Release);
-            true
+            self.frames.push_back(frame);
+            dropped
         }
 
-        /// Try to pop a frame. Returns None if buffer is empty.
-        /// O(1) - single atomic CAS on tail.
-        fn try_pop(&mut self) -> Option<CapturedFrame> {
-            let tail = self.tail.load(Ordering::Acquire);
-            if tail == self.head.load(Ordering::Acquire) {
-                return None; // buffer empty
-            }
-
-            let frame = self.buffer[tail].take();
-            self.tail
-                .store((tail + 1) % self.capacity, Ordering::Release);
-            frame
+        /// Pop the oldest frame, if any.
+        fn pop(&mut self) -> Option<CapturedFrame> {
+            self.frames.pop_front()
         }
 
-        /// Returns approximate number of frames in buffer
         #[allow(dead_code)]
         fn len(&self) -> usize {
-            let head = self.head.load(Ordering::Acquire);
-            let tail = self.tail.load(Ordering::Acquire);
-            (head + self.capacity - tail) % self.capacity
+            self.frames.len()
         }
     }
 
@@ -191,8 +174,7 @@ mod pipewire_capture {
         width: u32,
         height: u32,
         fps: f64,
-        // Lock-free ring buffer for frame passing (producer=PipeWire thread, consumer=encode thread)
-        // Using Mutex for interior mutability since we need &mut self for push/pop
+        // Frame queue (producer=PipeWire thread, consumer=encode thread), guarded by a Mutex
         frame_ring: Arc<std::sync::Mutex<FrameRingBuffer>>,
         _loop_thread: Option<std::thread::JoinHandle<()>>,
         _state: Option<PipeWireState>,
@@ -209,7 +191,7 @@ mod pipewire_capture {
     }
     impl PipeWireCapture {
         pub fn new(fps: f64, ring_buffer_capacity: usize) -> Result<Self> {
-            // Lock-free ring buffer for frame passing (producer=PipeWire thread, consumer=encode thread)
+            // Frame queue (producer=PipeWire thread, consumer=encode thread)
             // Capacity configurable to tune latency vs. throughput trade-off
             let frame_ring = Arc::new(std::sync::Mutex::new(FrameRingBuffer::new(
                 ring_buffer_capacity,
@@ -390,7 +372,7 @@ mod pipewire_capture {
 
             // Register process callback BEFORE connecting so it catches
             // frames from the very first buffer PipeWire delivers.
-            // Uses lock-free ring buffer for zero-contention frame passing.
+            // Frame passing goes through the bounded queue above.
             let frame_ring_clone = Arc::clone(&frame_ring);
             let _listener = stream
                 .add_local_listener::<()>()
@@ -407,10 +389,11 @@ mod pipewire_capture {
                                         width: w,
                                         height: h,
                                     };
-                                    // Try to push; if full, drop oldest frame (producer faster than consumer)
-                                    // This prevents backpressure buildup while maintaining low latency.
+                                    // If full, the oldest frame is dropped (producer
+                                    // faster than consumer): no backpressure buildup,
+                                    // and the consumer keeps seeing recent video.
                                     if let Ok(mut ring) = frame_ring_clone.lock() {
-                                        let _ = ring.try_push(frame);
+                                        ring.push_overwrite(frame);
                                     }
                                 }
                             }
@@ -459,13 +442,13 @@ mod pipewire_capture {
         }
 
         pub fn capture_frame(&mut self) -> Result<CapturedFrame> {
-            // Try to dequeue from the lock-free ring buffer.
+            // Try to dequeue from the frame ring buffer.
             // Use a shorter timeout (50ms) to avoid returning blank frames during
             // transient hiccups. At 30fps we need a frame every ~33ms.
             let deadline = Instant::now() + Duration::from_millis(50);
             loop {
                 if let Ok(mut ring) = self.frame_ring.lock() {
-                    if let Some(frame) = ring.try_pop() {
+                    if let Some(frame) = ring.pop() {
                         return Ok(frame);
                     }
                 }
@@ -501,6 +484,53 @@ mod pipewire_capture {
             if let Some(thread) = self._loop_thread.take() {
                 let _ = thread.join();
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod ring_tests {
+        use super::*;
+
+        fn frame(tag: u8) -> CapturedFrame {
+            CapturedFrame {
+                data: vec![tag],
+                width: 1,
+                height: 1,
+            }
+        }
+
+        #[test]
+        fn fifo_order_below_capacity() {
+            let mut r = FrameRingBuffer::new(3);
+            assert!(!r.push_overwrite(frame(1)));
+            assert!(!r.push_overwrite(frame(2)));
+            assert_eq!(r.pop().unwrap().data[0], 1);
+            assert_eq!(r.pop().unwrap().data[0], 2);
+            assert!(r.pop().is_none());
+        }
+
+        #[test]
+        fn full_buffer_drops_oldest_and_holds_exactly_capacity() {
+            let mut r = FrameRingBuffer::new(3);
+            for t in 1..=3 {
+                assert!(!r.push_overwrite(frame(t)));
+            }
+            assert_eq!(r.len(), 3, "all `capacity` slots are usable");
+            assert!(r.push_overwrite(frame(4)), "4th push reports a drop");
+            assert_eq!(r.pop().unwrap().data[0], 2, "frame 1 (oldest) was dropped");
+            assert_eq!(r.pop().unwrap().data[0], 3);
+            assert_eq!(r.pop().unwrap().data[0], 4);
+        }
+
+        #[test]
+        fn capacity_zero_and_one_are_safe() {
+            let mut z = FrameRingBuffer::new(0);
+            z.push_overwrite(frame(1));
+            assert_eq!(z.pop().unwrap().data[0], 1);
+            let mut one = FrameRingBuffer::new(1);
+            one.push_overwrite(frame(1));
+            assert!(one.push_overwrite(frame(2)));
+            assert_eq!(one.pop().unwrap().data[0], 2);
         }
     }
 }

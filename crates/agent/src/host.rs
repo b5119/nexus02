@@ -874,11 +874,8 @@ impl FileService for FileServiceImpl {
             tokio::fs::rename(&dest, &conflict_dest)
                 .await
                 .map_err(|e| Status::internal(format!("rename file conflict: {e}")))?;
-            // Move clock entry
-            if let Some(entry) = self.clocks.entries().into_iter().find(|(k, _)| k == &key) {
-                self.clocks.remove(&key).ok();
-                self.clocks.put(&conflict_rel, entry.1.clock).ok();
-            }
+            // Move clock entry: O(log n), one journal append.
+            self.clocks.rekey_subtree(&key, &conflict_rel).ok();
             tokio::fs::create_dir(&dest)
                 .await
                 .map_err(|e| Status::internal(format!("mkdir failed: {e}")))?;
@@ -936,40 +933,12 @@ impl FileService for FileServiceImpl {
                     tokio::fs::rename(&dest, &conflict_dest)
                         .await
                         .map_err(|e| Status::internal(format!("rename conflict: {e}")))?;
-                    // Remap clocks for the subtree under the renamed directory.
-                    let prefix = format!("{key}/");
-                    let conflict_prefix = format!("{conflict_rel}/");
-                    for (k, entry) in self.clocks.entries() {
-                        if k.starts_with(&prefix) {
-                            let new_key = format!("{conflict_prefix}{}", &k[prefix.len()..]);
-                            self.clocks.remove(&k).ok();
-                            self.clocks.put(&new_key, entry.clock).ok();
-                        }
-                    }
-                    // Remap tombstones for the subtree under the renamed directory.
-                    for (k, entry) in self.tombstones.entries() {
-                        if k.starts_with(&prefix) {
-                            let new_key = format!("{conflict_prefix}{}", &k[prefix.len()..]);
-                            self.tombstones.remove(&k).ok();
-                            self.tombstones.put(&new_key, entry.clock).ok();
-                        }
-                    }
-                    // Move the directory's own clock entry.
-                    if let Some(entry) = self.clocks.entries().into_iter().find(|(k, _)| k == &key)
-                    {
-                        self.clocks.remove(&key).ok();
-                        self.clocks.put(&conflict_rel, entry.1.clock).ok();
-                    }
-                    // Move the directory's own tombstone entry.
-                    if let Some(entry) = self
-                        .tombstones
-                        .entries()
-                        .into_iter()
-                        .find(|(k, _)| k == &key)
-                    {
-                        self.tombstones.remove(&key).ok();
-                        self.tombstones.put(&conflict_rel, entry.1.clock).ok();
-                    }
+                    // Move the directory's own entry and everything under it to the
+                    // conflict path. Prefix range scan: O(log n + m), one journal
+                    // append per store (was: four full-map clones and one full
+                    // file rewrite per moved key).
+                    self.clocks.rekey_subtree(&key, &conflict_rel).ok();
+                    self.tombstones.rekey_subtree(&key, &conflict_rel).ok();
                     // Recreate the directory at the original path (incoming wins).
                     tokio::fs::create_dir(&dest)
                         .await
@@ -1060,25 +1029,36 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Per-entry lock-and-remove helper: tries write_lock with 100ms timeout,
-/// then does the actual removal. Returns true if the entry was removed.
-async fn gc_remove_entry<F>(write_lock: &tokio::sync::Mutex<()>, key: &str, do_remove: F) -> bool
+/// Maximum keys removed under one `write_lock` acquisition. Each batch is a
+/// single journal append, so a sweep of k keys costs O(k) writes rather than the
+/// O(k * n) of rewriting the whole store per key, while the lock is still
+/// released often enough for client writes to interleave.
+const GC_BATCH: usize = 256;
+
+/// Lock-and-remove helper for a batch: tries `write_lock` with a 100 ms timeout,
+/// then removes the whole batch with one store operation. Returns the number
+/// removed (0 if the lock was contested; those keys are retried next sweep).
+async fn gc_remove_batch<F>(
+    write_lock: &tokio::sync::Mutex<()>,
+    keys: &[String],
+    do_remove: F,
+) -> u64
 where
-    F: FnOnce() -> std::io::Result<()>,
+    F: FnOnce(&[String]) -> std::io::Result<usize>,
 {
     let guard =
         tokio::time::timeout(std::time::Duration::from_millis(100), write_lock.lock()).await;
 
     match guard {
         Ok(guard) => {
-            let result = do_remove();
+            let result = do_remove(keys);
             drop(guard);
             tokio::task::yield_now().await;
-            result.is_ok()
+            result.unwrap_or(0) as u64
         }
         Err(_) => {
-            tracing::debug!(%key, "GC skipping contested entry");
-            false
+            tracing::debug!(count = keys.len(), "GC skipping contested batch");
+            0
         }
     }
 }
@@ -1097,35 +1077,44 @@ async fn gc_sweep(
 
     // Phase 1: TTL-based tombstone eviction
     let mut tombstone_removed = 0u64;
-    for (key, entry) in tombstones.entries() {
+    let mut expired: Vec<String> = Vec::new();
+    for (i, (key, entry)) in tombstones.entries().into_iter().enumerate() {
+        if i % 256 == 255 {
+            tokio::task::yield_now().await; // the exists() syscalls below are blocking
+        }
         if entry.created_at > 0 && now.saturating_sub(entry.created_at) >= ttl_secs {
-            let file_path = root.join(&key);
             // TOCTOU: file existence is checked outside write_lock, so a
             // concurrent write could recreate the file between this check
             // and the removal. Worst case: we remove a valid entry one sweep
             // early — acceptable per ADR 0011 (conservative default).
-            if !file_path.exists() {
-                let removed = gc_remove_entry(write_lock, &key, || tombstones.remove(&key)).await;
-                if removed {
-                    tombstone_removed += 1;
-                }
+            if !root.join(&key).exists() {
+                expired.push(key);
             }
         }
+    }
+    for chunk in expired.chunks(GC_BATCH) {
+        tombstone_removed +=
+            gc_remove_batch(write_lock, chunk, |keys| tombstones.remove_many(keys)).await;
     }
 
     // Phase 2: Orphaned clock entry removal (no file on disk, no tombstone)
     let mut orphaned_removed = 0u64;
-    for (key, _) in clocks.entries() {
-        let file_path = root.join(&key);
-        if !file_path.exists() && tombstones.get(&key).0.is_empty() {
-            let removed = gc_remove_entry(write_lock, &key, || clocks.remove(&key)).await;
-            if removed {
-                orphaned_removed += 1;
-            }
+    let mut orphaned: Vec<String> = Vec::new();
+    for (i, (key, _)) in clocks.entries().into_iter().enumerate() {
+        if i % 256 == 255 {
+            tokio::task::yield_now().await;
+        }
+        if !root.join(&key).exists() && !tombstones.contains(&key) {
+            orphaned.push(key);
         }
     }
+    for chunk in orphaned.chunks(GC_BATCH) {
+        orphaned_removed +=
+            gc_remove_batch(write_lock, chunk, |keys| clocks.remove_many(keys)).await;
+    }
 
-    // Phase 3: Hard cap enforcement (after TTL pass)
+    // Phase 3: Hard cap enforcement (after TTL pass). Sorting is O(n log n) once
+    // per sweep (default every 6 h), which is not worth a selection algorithm.
     let clock_count = clocks.len();
     let tombstone_count = tombstones.len();
 
@@ -1133,14 +1122,15 @@ async fn gc_sweep(
         let mut entries = tombstones.entries();
         entries.sort_by_key(|(_, e)| e.created_at);
         let excess = tombstone_count - config.max_entries;
-        for (key, _) in entries.iter().take(excess) {
-            gc_remove_entry(write_lock, key, || tombstones.remove(key)).await;
+        let victims: Vec<String> = entries.into_iter().take(excess).map(|(k, _)| k).collect();
+        for chunk in victims.chunks(GC_BATCH) {
+            gc_remove_batch(write_lock, chunk, |keys| tombstones.remove_many(keys)).await;
         }
     }
 
     if clock_count > config.max_entries {
         let mut entries: Vec<_> = clocks.entries();
-        entries.retain(|(key, _)| !root.join(key).exists() && tombstones.get(key).0.is_empty());
+        entries.retain(|(key, _)| !root.join(key).exists() && !tombstones.contains(key));
 
         if entries.is_empty() {
             tracing::warn!(
@@ -1151,8 +1141,13 @@ async fn gc_sweep(
         } else {
             entries.sort_by_key(|(_, e)| e.last_updated_at);
             let target_remove = clock_count.saturating_sub(config.max_entries);
-            for (key, _) in entries.iter().take(target_remove) {
-                gc_remove_entry(write_lock, key, || clocks.remove(key)).await;
+            let victims: Vec<String> = entries
+                .into_iter()
+                .take(target_remove)
+                .map(|(k, _)| k)
+                .collect();
+            for chunk in victims.chunks(GC_BATCH) {
+                gc_remove_batch(write_lock, chunk, |keys| clocks.remove_many(keys)).await;
             }
         }
     }
