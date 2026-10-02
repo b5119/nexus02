@@ -95,4 +95,6 @@ dependencies {
     implementation("io.grpc:grpc-okhttp:1.68.1")
     implementation("io.grpc:grpc-protobuf-lite:1.68.1")
     implementation("com.google.protobuf:protobuf-kotlin-lite:4.29.3")
+
+    testImplementation("junit:junit:4.13.2")
 }

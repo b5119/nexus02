@@ -55,6 +55,24 @@ object GrpcClient {
         }
 
     /**
+     * Builds a data-plane channel: TLS pinned to the host certificate obtained at
+     * pairing, authenticated by the `x-nexus-token` header. Callers own the
+     * returned channel and must shut it down.
+     */
+    fun newDataChannel(host: String, certPem: String, authToken: String): ManagedChannel {
+        val sslContext = TrustStore.sslContext(certPem)
+        return OkHttpChannelBuilder.forAddress(host, DATA_PORT)
+            .sslSocketFactory(sslContext.socketFactory)
+            // Host identity is pinned in TrustStore (public-key match), so
+            // hostname matching against the self-signed cert is redundant.
+            .hostnameVerifier { _, _ -> true }
+            .intercept(MetadataUtils.newAttachHeadersInterceptor(authHeaders(authToken)))
+            .keepAliveTime(30, TimeUnit.SECONDS)
+            .keepAliveTimeout(10, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
      * Opens the pinned-TLS data channel and starts the bidirectional stream.
      * Returns the host-to-viewer VideoFrame flow; errors surface to the caller
      * when the flow fails or completes.
@@ -65,16 +83,7 @@ object GrpcClient {
         authToken: String,
         requests: Flow<InputEvent>
     ): Flow<VideoFrame> = withContext(Dispatchers.IO) {
-        val sslContext = TrustStore.sslContext(certPem)
-        val channel = OkHttpChannelBuilder.forAddress(host, DATA_PORT)
-            .sslSocketFactory(sslContext.socketFactory)
-            // Host identity is pinned in TrustStore (public-key match), so
-            // hostname matching against the self-signed cert is redundant.
-            .hostnameVerifier { _, _ -> true }
-            .intercept(MetadataUtils.newAttachHeadersInterceptor(authHeaders(authToken)))
-            .keepAliveTime(30, TimeUnit.SECONDS)
-            .keepAliveTimeout(10, TimeUnit.SECONDS)
-            .build()
+        val channel = newDataChannel(host, certPem, authToken)
         dataChannel?.shutdownNow()
         dataChannel = channel
         StreamServiceGrpcKt.StreamServiceCoroutineStub(channel).remoteControl(requests)
