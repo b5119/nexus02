@@ -37,8 +37,11 @@ object GrpcClient {
     /** Exchanges the pairing code for the host cert + token. Trust-on-first-use TLS. */
     suspend fun pair(host: String, code: String, deviceId: String): PairResponse =
         withContext(Dispatchers.IO) {
+            // The host certificate is unknown before the exchange (trust-on-first-use);
+            // the one-time code is what authenticates this connection (ADR 0013).
+            val context = TrustStore.pairingContext()
             val channel = OkHttpChannelBuilder.forAddress(host, PAIR_PORT)
-                .sslSocketFactory(TrustStore.pairingContext().socketFactory)
+                .sslSocketFactory(context.socketFactory)
                 .hostnameVerifier { _, _ -> true }
                 .build()
             pairChannel?.shutdownNow()
@@ -53,6 +56,74 @@ object GrpcClient {
                     .build()
             )
         }
+
+    /**
+     * Asks the host to pair by approval: the user clicks "Pair" in a dialog on the host
+     * and compares the short code (see [Sas]). [onHostCertificate] receives the SHA-256
+     * fingerprint of the certificate the host presented, during the handshake, so the
+     * code can be displayed while this call waits for the answer (up to ~75 s).
+     *
+     * Wi-Fi between two clients can be flaky (a sleeping radio makes the first packets fail
+     * with "host unreachable"), so a failure to even CONNECT is retried up to
+     * [CONNECT_ATTEMPTS] times, calling [onRetry]. A failure after the request was
+     * delivered (denial, timeout) is never retried, so the user is not shown a second dialog.
+     */
+    suspend fun pairByApproval(
+        host: String,
+        port: Int,
+        deviceId: String,
+        deviceName: String,
+        onRetry: (attempt: Int, of: Int) -> Unit = { _, _ -> },
+        onHostCertificate: (String) -> Unit,
+    ): PairResponse = withContext(Dispatchers.IO) {
+        var attempt = 1
+        while (true) {
+            val context = TrustStore.capturingPairingContext(onHostCertificate)
+            val channel = OkHttpChannelBuilder.forAddress(host, port)
+                .sslSocketFactory(context.socketFactory)
+                .hostnameVerifier { _, _ -> true }
+                .build()
+            try {
+                return@withContext PairServiceGrpcKt.PairServiceCoroutineStub(channel)
+                    .withDeadlineAfter(75, TimeUnit.SECONDS)
+                    .requestPair(
+                        PairRequest.newBuilder()
+                            .setRequestApproval(true)
+                            .setInitiatorDeviceId(deviceId)
+                            .setInitiatorCertPem("") // viewer-only client: no mTLS identity cert
+                            .setInitiatorDisplayName(deviceName)
+                            .build()
+                    )
+            } catch (e: io.grpc.StatusRuntimeException) {
+                if (attempt >= CONNECT_ATTEMPTS || !isConnectFailure(e)) throw e
+                attempt++
+                onRetry(attempt, CONNECT_ATTEMPTS)
+                kotlinx.coroutines.delay(CONNECT_RETRY_DELAY_MS)
+            } finally {
+                channel.shutdown()
+            }
+        }
+        @Suppress("UNREACHABLE_CODE")
+        throw IllegalStateException("unreachable")
+    }
+
+    const val CONNECT_ATTEMPTS = 6
+    const val CONNECT_RETRY_DELAY_MS = 1_500L
+
+    /**
+     * True if [e] means the TCP/TLS connection could not be established at all (so the
+     * request never reached the host and a retry is safe): status UNAVAILABLE caused by
+     * a refused/unreachable/timed-out/unresolvable connect.
+     */
+    fun isConnectFailure(e: Throwable): Boolean {
+        if (io.grpc.Status.fromThrowable(e).code != io.grpc.Status.Code.UNAVAILABLE) return false
+        return generateSequence(e) { it.cause }.any {
+            it is java.net.ConnectException ||
+                it is java.net.NoRouteToHostException ||
+                it is java.net.SocketTimeoutException ||
+                it is java.net.UnknownHostException
+        }
+    }
 
     /**
      * Builds a data-plane channel: TLS pinned to the host certificate obtained at

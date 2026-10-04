@@ -49,6 +49,29 @@ object TrustStore {
         }
     }
 
+    /**
+     * Pairing context for approval pairing: accepts the host certificate (the user
+     * verifies it by comparing the short code, see [Sas]) but reports its SHA-256
+     * fingerprint to [onCertificate] during the handshake, before the request
+     * completes, so the code can be shown while the host's dialog is open.
+     */
+    fun capturingPairingContext(onCertificate: (fingerprintHex: String) -> Unit): SSLContext {
+        val manager = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                throw CertificateException("Client certificates are not accepted")
+            }
+
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                val leaf = chain?.firstOrNull() ?: throw CertificateException("Empty certificate chain")
+                val digest = java.security.MessageDigest.getInstance("SHA-256").digest(leaf.encoded)
+                onCertificate(digest.joinToString("") { "%02x".format(it) })
+            }
+
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+        return SSLContext.getInstance("TLS").apply { init(null, arrayOf(manager), SecureRandom()) }
+    }
+
     private fun parsePem(pem: String): X509Certificate {
         val begin = pem.indexOf("-----BEGIN CERTIFICATE-----")
         val end = pem.indexOf("-----END CERTIFICATE-----")
