@@ -1,6 +1,9 @@
+mod approval;
+mod beacon;
 mod config;
 mod discovery;
 mod host;
+mod pair_link;
 mod pairing;
 
 use anyhow::Result;
@@ -166,6 +169,11 @@ async fn main() -> Result<()> {
             display_name,
         } => {
             tracing::info!(timeout_secs, "starting pair-mode listener");
+            let display_name = if display_name.is_empty() {
+                hostname()
+            } else {
+                display_name
+            };
             pairing::run_pairing_listener(50052, timeout_secs, &display_name).await
         }
 

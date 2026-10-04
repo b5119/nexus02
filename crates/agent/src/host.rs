@@ -1262,6 +1262,54 @@ pub async fn run(
         }
     };
 
+    // Always-on pairing by approval: a device found over mDNS asks to pair and the
+    // user clicks "Pair" in a dialog on this machine (no code to type). Failure here
+    // (e.g. the port is taken) must not stop file serving.
+    {
+        let store = peers_store.clone();
+        let (cert_pem, key_pem) = (tls.cert_pem.clone(), tls.key_pem.clone());
+        let token = auth_token.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::approval::run_approval_listener(
+                crate::approval::APPROVAL_PORT,
+                store,
+                device_id,
+                cert_pem,
+                key_pem,
+                token,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "pairing approval listener stopped");
+            }
+        });
+    }
+
+    // Multicast-free discovery: answer broadcast probes and announce this host on the
+    // LAN, for networks (e.g. campus Wi-Fi) where mDNS gets no replies. Failure to bind
+    // (port taken) must not stop file serving.
+    match crate::beacon::bind_beacon_socket(crate::beacon::BEACON_PORT).await {
+        Ok(socket) => {
+            let beacon = crate::beacon::encode_beacon(
+                &device_id.to_string(),
+                &display_name,
+                port,
+                crate::approval::APPROVAL_PORT,
+            );
+            tokio::spawn(crate::beacon::run_beacon(
+                Arc::new(socket),
+                crate::beacon::BEACON_PORT,
+                beacon,
+                crate::beacon::BEACON_INTERVAL,
+            ));
+            tracing::info!(
+                port = crate::beacon::BEACON_PORT,
+                "UDP discovery beacon started"
+            );
+        }
+        Err(e) => tracing::warn!(error = %e, "UDP discovery beacon unavailable"),
+    }
+
     let mut tls_config = ServerTlsConfig::new().identity(identity);
     if let Some(combined) = build_peer_ca_pem(&peers_store) {
         tls_config = tls_config

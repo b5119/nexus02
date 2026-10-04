@@ -15,7 +15,7 @@ members = [
 # version drift between crates is a common source of "works on Linux,
 # fails to link on Android" bugs.
 [workspace.dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "sync", "time", "process"] }
 tonic = { version = "0.14", features = ["tls-ring"] }
 prost = "0.14"
 serde = { version = "1", features = ["derive"] }

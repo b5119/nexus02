@@ -154,6 +154,8 @@ pub async fn pair_with_host(
         initiator_device_id: initiator_device_id.to_string(),
         initiator_cert_pem: cert_pem.to_string(),
         initiator_display_name: display_name.to_string(),
+        // This CLI uses the one-time-code flow; approval pairing is for phones.
+        request_approval: false,
     };
 
     let resp = client.request_pair(Request::new(req)).await?.into_inner();

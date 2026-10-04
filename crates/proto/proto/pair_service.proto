@@ -21,6 +21,10 @@ message PairRequest {
   string initiator_device_id = 2;        // UUID of the initiating device
   string initiator_cert_pem = 3;         // PEM of the initiator's identity cert
   string initiator_display_name = 4;     // Human-readable name (e.g. "Frank's Phone")
+  // Ask the host's user to approve this device on the host itself, instead of
+  // proving possession of a one-time code. `code` is ignored when set. Served by the
+  // always-on approval listener (port 50053) only; the code listener ignores it.
+  bool request_approval = 5;
 }
 
 message PairResponse {

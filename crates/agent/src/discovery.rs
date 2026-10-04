@@ -13,6 +13,26 @@ fn instance_name(display_name: &str, device_id: &DeviceId) -> String {
     format!("{display_name} ({short})")
 }
 
+/// Stops `daemon` from announcing on interfaces other devices cannot reach (Docker
+/// bridges etc.), so a phone resolving this host never gets e.g. `172.18.0.1`.
+fn exclude_unreachable_interfaces(daemon: &ServiceDaemon) {
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return;
+    };
+    let v4: Vec<(String, std::net::Ipv4Addr)> = ifaces
+        .iter()
+        .filter_map(|i| match i.ip() {
+            std::net::IpAddr::V4(ip) => Some((i.name.clone(), ip)),
+            _ => None,
+        })
+        .collect();
+    for name in crate::pair_link::unreachable_interface_names(&v4) {
+        if let Err(e) = daemon.disable_interface(mdns_sd::IfKind::Name(name.clone())) {
+            tracing::debug!(interface = %name, "could not exclude interface from mDNS: {e}");
+        }
+    }
+}
+
 /// RAII guard that registers an mDNS service on creation and deregisters on drop.
 pub struct DiscoveryService {
     daemon: ServiceDaemon,
@@ -27,22 +47,29 @@ impl DiscoveryService {
         peers: &PeersStore,
     ) -> Result<Self> {
         let daemon = ServiceDaemon::new()?;
+        exclude_unreachable_interfaces(&daemon);
         let name = instance_name(display_name, device_id);
         let hostname = format!("{}.local.", device_id);
         let device_id_str = device_id.to_string();
 
         let paired_list: Vec<String> = peers.list().iter().map(|(id, _entry)| id.clone()).collect();
         let paired_str = paired_list.join(",");
+        let approve_port = crate::approval::APPROVAL_PORT.to_string();
 
         let properties: &[(&str, &str)] = &[
             ("device_id", &device_id_str),
             ("nexus_version", "1"),
             ("paired", &paired_str),
             ("display_name", display_name),
+            // Where to send "please pair me" requests (see approval.rs).
+            ("approve_port", &approve_port),
         ];
 
+        // An empty IP list announces no addresses unless addr_auto is enabled, which
+        // left browsers unable to resolve this service to a usable IP.
         let info = ServiceInfo::new("_nexus._tcp.local.", &name, &hostname, "", port, properties)
-            .context("creating mDNS service info")?;
+            .context("creating mDNS service info")?
+            .enable_addr_auto();
 
         // Fullname for deregistration: <instance>._nexus._tcp.local.
         let fullname = format!("{name}._nexus._tcp.local.");
