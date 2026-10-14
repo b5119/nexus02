@@ -1,0 +1,14 @@
+[package]
+name = "nexus-android-browser"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "nexus_android_browser"
+crate-type = ["cdylib"]
+
+[dependencies]
+nexus-agent = { path = "../agent", features = [] }
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "rt"] }
+jni = { version = "0.22", default-features = false }
+urlencoding = "2"
