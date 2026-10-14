@@ -49,7 +49,7 @@ impl StreamService for SyntheticStreamHost {
                     height: 1080,
                 };
 
-                match encoder.encode(frame) {
+                match encoder.encode(&frame) {
                     Ok(encoded) => {
                         seq += 1;
                         let ts = std::time::SystemTime::now()

@@ -52,13 +52,15 @@ impl ScreenCapture {
         anyhow::bail!("screen capture requires Linux with X11 or PipeWire");
     }
 
-    /// Capture a single frame.
-    pub fn capture_frame(&mut self) -> Result<CapturedFrame> {
+    /// Capture the next frame. `Ok(None)` means the screen has not changed since the last
+    /// frame (the Wayland screen-share portal only sends frames on change): the caller should
+    /// keep showing the previous picture, NOT invent a black one.
+    pub fn capture_frame(&mut self) -> Result<Option<CapturedFrame>> {
         match self {
             #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
             Self::PipeWire(cap) => cap.capture_frame(),
             #[cfg(target_os = "linux")]
-            Self::X11(cap) => cap.capture_frame(),
+            Self::X11(cap) => cap.capture_frame().map(Some),
             #[cfg(not(target_os = "linux"))]
             Self::Unsupported => anyhow::bail!("not supported on this platform"),
         }
@@ -441,26 +443,19 @@ mod pipewire_capture {
             })
         }
 
-        pub fn capture_frame(&mut self) -> Result<CapturedFrame> {
-            // Try to dequeue from the frame ring buffer.
-            // Use a shorter timeout (50ms) to avoid returning blank frames during
-            // transient hiccups. At 30fps we need a frame every ~33ms.
-            let deadline = Instant::now() + Duration::from_millis(50);
+        /// Waits briefly for a new frame. `Ok(None)` means none arrived (an unchanged screen
+        /// sends nothing), so the caller repeats its previous frame. Returning a black frame
+        /// here, as this used to, made the viewer flash black whenever the desktop was still.
+        pub fn capture_frame(&mut self) -> Result<Option<CapturedFrame>> {
+            let deadline = Instant::now() + Duration::from_millis(10);
             loop {
                 if let Ok(mut ring) = self.frame_ring.lock() {
                     if let Some(frame) = ring.pop() {
-                        return Ok(frame);
+                        return Ok(Some(frame));
                     }
                 }
                 if Instant::now() >= deadline {
-                    // No frame yet; return a blank frame so the pipeline stays alive
-                    // instead of stalling. This should be rare once streaming is stable.
-                    let data = vec![0u8; (self.width * self.height * 4) as usize];
-                    return Ok(CapturedFrame {
-                        data,
-                        width: self.width,
-                        height: self.height,
-                    });
+                    return Ok(None);
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -626,9 +621,20 @@ impl X11Capture {
 
         let bytes_per_line = unsafe { (*image).bytes_per_line } as usize;
         let size = (self.height as usize) * bytes_per_line;
-        let data = unsafe {
+        let raw = unsafe {
             let ptr = (*image).data as *const u8;
-            std::slice::from_raw_parts(ptr, size).to_vec()
+            std::slice::from_raw_parts(ptr, size)
+        };
+        // The encoder expects tight rows (width * 4 bytes). X may pad each row.
+        let row_bytes = (self.width as usize) * 4;
+        let data = if bytes_per_line == row_bytes {
+            raw.to_vec()
+        } else {
+            let mut tight = Vec::with_capacity(row_bytes * self.height as usize);
+            for y in 0..self.height as usize {
+                tight.extend_from_slice(&raw[y * bytes_per_line..y * bytes_per_line + row_bytes]);
+            }
+            tight
         };
 
         unsafe {

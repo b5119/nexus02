@@ -244,7 +244,7 @@ impl StreamService for StreamHostService {
                         Err(TrySendError::Full(_)) => {
                             frames_dropped_channel_full.fetch_add(1, Ordering::Relaxed);
                             awaiting_keyframe = true;
-                                      encoder.request_keyframe();
+                            encoder.request_keyframe();
                         }
                         Err(TrySendError::Closed(_)) => {
                             tracing::info!("viewer disconnected, ending stream");
