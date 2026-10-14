@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="stream_overlay_text">#CCFFFFFF</color>
+    <color name="nexus_online">#2E7D32</color>
+    <color name="nexus_offline">#9E9E9E</color>
 
     <!-- Brand palette (cool indigo/blue, works in day + night via -night overlap) -->
     <color name="nexus_primary">#3D5AFE</color>

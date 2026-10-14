@@ -20,4 +20,10 @@
     <string name="mode_pointer">Pointer</string>
     <string name="keyboard_short">Keys</string>
     <string name="fit_toggle">Fit / fill screen</string>
+    <string name="back_to_computers">Back to computers</string>
+    <string name="stats_toggle">Show or hide connection stats</string>
+    <string name="close_stream">Close</string>
+    <string name="show_controls">Show or hide controls</string>
+    <string name="status_online">Online</string>
+    <string name="status_offline">Not found on this network</string>
 </resources>
