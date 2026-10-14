@@ -92,9 +92,37 @@ Document ids are `<hostId>:<path>` (`[DocId]`). Reads use `StorageManager.openPr
 - **Read-only for now**: write modes deferred to a later ADR.
 - **LAN-trust only**: same as the rest of Nexus — not hardened for hostile networks.
 
-## Layer 2: Android file access — built (feature B)
+## Layer 2: Android file access — built (feature A)
 
-[ADR 0017](docs/adr/0017-layer-2-android-file-access.md) also describes feature B: the Dell mounting the phone's storage. This is deferred until feature A ships and the Storage trait is extracted from `FileServiceImpl`; an Android SAF implementation would follow the same pattern.
+[ADR 0017](docs/adr/0017-layer-2-android-file-access.md) describes the Android Documents Provider approach. A pure Kotlin `NexusDocumentsProvider` (lines 38–196 of `android/app/src/main/java/com/vectorzero/nexus/documents/NexusDocumentsProvider.kt`) displays every paired Nexus host as a root in the system file picker. Calls match the Android SAF callbacks:
+
+| Android callback | Nexus RPC |
+|------------------|-----------|
+| `queryRoots` | one root per host in `[HostStore]` |
+| `queryChildDocuments` | `ListDir` via `FileClients.forHost(host).list(parent.path)` |
+| `queryDocument` | `Stat` (usually served from `[MetaCache]`) |
+| `openDocument` (read) | ReadFile ranges, via a proxy file descriptor backed by `[ReadAheadBuffer]` |
+
+Document ids are `<hostId>:<path>` (`[DocId]`). Reads use `StorageManager.openProxyFileDescriptor`, which gives callers real random access (seeking in a video does not download the whole file), backed by a `[ReadAheadBuffer]` so sequential reads cost one RPC per 256 KiB. Reads are read-only; write modes are refused for now (deferred to a later ADR).
+
+- **Built and verified**: emulator + 18 unit tests (`DocIdTest`, `MetaCacheTest`, `ReadAheadBufferTest`).
+- **Read-only for now**: write modes deferred to a later ADR.
+- **LAN-trust only**: same as the rest of Nexus — not hardened for hostile networks.
+
+## Layer 2: Android file access — Feature B foundation
+
+Feature B: "the Dell mounts the phone's storage" (Android as host, serving files through SAF so a Linux laptop can FUSE-mount them).
+
+**Progress: Foundation laid — Storage trait + Host implementation added.**
+
+- **`crates/agent/src/storage.rs`** — `Storage` trait with `list_dir`, `stat`, `read_file`, `write_file`, `mkdir_file`, `delete_file`, `rename_file` methods using simple Rust types (no tonic/prost dependency).
+- **`crates/agent/src/storage_host.rs`** — `StorageHost` implementation backed by `FileServiceImpl`, the native host agent. This adapts the existing host file logic into the [`Storage`] interface, enabling:
+  - Shared file logic between the host binary, tests, and (future) the Android JNI bridge.
+  - A common interface for Feature B's Android SAF implementation.
+- **Android JNI bridge** (`crates/android-browser/` + `saf_bridge.rs`) — previously dropped because it didn't compile; the Storage trait provides a clean interface for a future reimplementation.
+- **Roadmap**: Once the Android JNI bridge compiles and the `StorageAndroid` implementation is written (following the same callback→RPC mapping as Feature A), a Linux laptop can FUSE-mount a phone's storage via `nexus-mount`, using the phone as a host just as the Dell mounts the phone.
+
+**Remaining**: Write the `StorageAndroid` JNI implementation (in `crates/android-browser` or a new bridge crate), register the document provider in `AndroidManifest.xml` with SAF support, and verify end-to-end on a device.
 
 **Done in the Phase 0 cleanup**
 
