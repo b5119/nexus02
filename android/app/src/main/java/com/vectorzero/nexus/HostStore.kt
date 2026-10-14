@@ -46,6 +46,18 @@ object HostStore {
         persist(context, hosts)
     }
 
+    /**
+     * Records a new address for an already-paired host, e.g. after its DHCP lease changed.
+     * @return true if anything was updated.
+     */
+    fun updateAddress(context: Context, hostDeviceId: String, address: String): Boolean {
+        val hosts = loadHosts(context)
+        val target = hosts.firstOrNull { it.hostDeviceId == hostDeviceId } ?: return false
+        if (target.address == address) return false
+        persist(context, hosts.map { if (it === target) it.copy(address = address) else it })
+        return true
+    }
+
     fun removeHost(context: Context, id: String) {
         persist(context, loadHosts(context).filterNot { it.id == id })
     }

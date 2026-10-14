@@ -18,6 +18,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val adapter = HostAdapter()
 
+    /** Paired computers currently answering on the network, by device id. */
+    private val online = HashMap<String, NearbyHost>()
+    private lateinit var discovery: NearbyHosts
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -30,11 +34,31 @@ class MainActivity : AppCompatActivity() {
         binding.addHost.setOnClickListener {
             startActivity(Intent(this, PairingActivity::class.java))
         }
+
+        discovery = NearbyHosts(this) { nearby ->
+            online.clear()
+            for (host in nearby) online[host.deviceId] = host
+            // A computer that moved to a new address (DHCP) keeps working: remember the new one.
+            for (host in nearby) HostStore.updateAddress(this, host.deviceId, host.address)
+            refresh()
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        val hosts = HostStore.loadHosts(this)
+        refresh()
+        discovery.start()
+    }
+
+    override fun onPause() {
+        discovery.stop()
+        online.clear()
+        super.onPause()
+    }
+
+    /** Reloads the list, with computers that are online first. */
+    private fun refresh() {
+        val hosts = HostStore.loadHosts(this).sortedByDescending { it.hostDeviceId in online }
         adapter.submit(hosts)
         binding.emptyState.visibility = if (hosts.isEmpty()) View.VISIBLE else View.GONE
         binding.hostList.visibility = if (hosts.isEmpty()) View.GONE else View.VISIBLE
@@ -45,10 +69,7 @@ class MainActivity : AppCompatActivity() {
             .setMessage(getString(R.string.unpair_confirmation))
             .setPositiveButton("Unpair") { _, _ ->
                 HostStore.removeHost(this, host.id)
-                val hosts = HostStore.loadHosts(this)
-                adapter.submit(hosts)
-                binding.emptyState.visibility = if (hosts.isEmpty()) View.VISIBLE else View.GONE
-                binding.hostList.visibility = if (hosts.isEmpty()) View.GONE else View.VISIBLE
+                refresh()
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -76,6 +97,16 @@ class MainActivity : AppCompatActivity() {
             holder.address.text = host.address
             holder.deviceId.text = host.hostDeviceId.take(8).uppercase().chunked(4).joinToString(" ")
             holder.avatar.text = host.name.firstOrNull()?.uppercase() ?: "?"
+            val isOnline = host.hostDeviceId in online
+            holder.status.text = getString(if (isOnline) R.string.status_online else R.string.status_offline)
+            holder.status.setTextColor(
+                getColor(if (isOnline) R.color.nexus_online else R.color.nexus_offline)
+            )
+            holder.status.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                if (isOnline) R.drawable.bg_status_dot else 0, 0, 0, 0
+            )
+            holder.status.compoundDrawablePadding = 12
+            holder.itemView.alpha = if (isOnline) 1f else 0.7f
             holder.itemView.setOnClickListener {
                 startActivity(
                     Intent(this@MainActivity, StreamActivity::class.java)
@@ -95,6 +126,7 @@ class MainActivity : AppCompatActivity() {
             val address: TextView = itemView.findViewById(R.id.hostAddress)
             val deviceId: TextView = itemView.findViewById(R.id.hostDeviceId)
             val avatar: TextView = itemView.findViewById(R.id.hostAvatar)
+            val status: TextView = itemView.findViewById(R.id.hostStatus)
         }
     }
 }
