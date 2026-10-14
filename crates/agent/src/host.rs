@@ -1370,7 +1370,7 @@ pub async fn run(
         .await
         .map_err(|e| anyhow::anyhow!("capture init failed: {e}"))??;
         let (width, height) = capture.dimensions();
-        let encoder = nexus_stream::encode::Encoder::new(width, height)?;
+        let encoder = nexus_stream::encode::Encoder::with_quality(width, height, &quality)?;
         let injector = nexus_stream::inject::Injector::new()?;
 
         let stream_host = nexus_stream::host::run_stream_host(capture, encoder, injector).await?;
