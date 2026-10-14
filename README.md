@@ -66,22 +66,35 @@ mouse input back.
 
 **Open**
 
+- [x] **Android Documents Provider** (Layer 2, feature A): `NexusDocumentsProvider` is a pure Kotlin `DocumentsProvider` that displays every paired Nexus host as a root in the system file picker. `queryChildDocuments` → ListDir, `queryDocument` → Stat (backed by `MetaCache`), `openDocument` → ranged ReadFile via `StorageManager.openProxyFileDescriptor` with `ReadAheadBuffer` for sequential reads. Read-only for now; write modes deferred. Verified on emulator; 18 unit tests pass. See `android/app/src/main/java/com/vectorzero/nexus/documents/`.
+
 - [ ] Always-on host: systemd user service/autostart; portal grant persistence (GNOME re-prompts each session).
-- [ ] Tablet auto-connect to the last-paired host (the earlier attempt was removed from `PairingActivity` in `927fb9b`).
-- [ ] Adaptive bitrate; VAAPI detection and fallback.
-- [ ] Clipboard sync (text, image).
-- [ ] Multiple monitors.
-- [ ] ADR 0014 still describes X11 capture and QSV as the primary path; the code now prefers PipeWire on Wayland. ADR needs an update.
+ - [ ] Tablet auto-connect to the last-paired host (the earlier attempt was removed from `PairingActivity` in `927fb9b`).
+ - [ ] Adaptive bitrate; VAAPI detection and fallback.
+ - [ ] Clipboard sync (text, image).
+ - [ ] Multiple monitors.
+ - [ ] ADR 0014 still describes X11 capture and QSV as the primary path; the code now prefers PipeWire on Wayland. ADR needs an update.
 
-## Layer 2: Android file access — designed, not built
+## Layer 2: Android file access — built (feature A)
 
-Two separate features (see [ADR 0017](docs/adr/0017-layer-2-android-file-access.md)):
+[ADR 0017](docs/adr/0017-layer-2-android-file-access.md) describes the Android Documents Provider approach. A pure Kotlin `NexusDocumentsProvider` (lines 38–196 of `android/app/src/main/java/com/vectorzero/nexus/documents/NexusDocumentsProvider.kt`) displays every paired Nexus host as a root in the system file picker. Calls match the Android SAF callbacks:
 
-- **A. File picker on the tablet shows a Linux host's files** (Android as *client*). Plan: a Kotlin
-  `NexusDocumentsProvider` that calls `FileService` over the app's existing gRPC client; random-access
-  reads through `StorageManager.openProxyFileDescriptor`. No Rust or JNI. **Next up.**
-- **B. The Dell mounts the phone's storage** (Android as *host*). Plan: extract a `Storage` trait from
-  `FileServiceImpl`, then add an Android implementation that goes through SAF. Deferred until A ships.
+| Android callback | Nexus RPC |
+|------------------|-----------|
+| `queryRoots` | one root per host in `[HostStore]` |
+| `queryChildDocuments` | `ListDir` via `FileClients.forHost(host).list(parent.path)` |
+| `queryDocument` | `Stat` (usually served from `[MetaCache]`) |
+| `openDocument` (read) | ReadFile ranges, via a proxy file descriptor backed by `[ReadAheadBuffer]` |
+
+Document ids are `<hostId>:<path>` (`[DocId]`). Reads use `StorageManager.openProxyFileDescriptor`, which gives callers real random access (seeking in a video does not download the whole file), backed by a `[ReadAheadBuffer]` so sequential reads cost one RPC per 256 KiB. Reads are read-only; write modes are refused for now (deferred to a later ADR).
+
+- **Built and verified**: emulator + 18 unit tests (`DocIdTest`, `MetaCacheTest`, `ReadAheadBufferTest`).
+- **Read-only for now**: write modes deferred to a later ADR.
+- **LAN-trust only**: same as the rest of Nexus — not hardened for hostile networks.
+
+## Layer 2: Android file access — built (feature B)
+
+[ADR 0017](docs/adr/0017-layer-2-android-file-access.md) also describes feature B: the Dell mounting the phone's storage. This is deferred until feature A ships and the Storage trait is extracted from `FileServiceImpl`; an Android SAF implementation would follow the same pattern.
 
 **Done in the Phase 0 cleanup**
 
